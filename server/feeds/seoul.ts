@@ -1,4 +1,4 @@
-import { normalizeStation } from "../lines.js";
+import { normalizeStation, stationOnLine } from "../lines.js";
 import { stationIndex } from "../network.js";
 import type { Arrival, Direction, Feed, Network, NetworkLine, Snapshot, Train } from "../types.js";
 
@@ -126,9 +126,10 @@ export class SeoulFeed implements Feed {
 
   private place(line: NetworkLine, id: string, r: ArrivalRow): Placed | undefined {
     const index = this.index.get(line.id)!;
-    const S = normalizeStation(r.statnNm);
-    const F = this.stationName.get(r.statnFid);
-    const T = this.stationName.get(r.statnTid);
+    const on = (name: string | undefined) => (name === undefined ? undefined : stationOnLine(line.id, name));
+    const S = on(r.statnNm)!;
+    const F = on(this.stationName.get(r.statnFid));
+    const T = on(this.stationName.get(r.statnTid));
     const options = index.get(S);
     if (!options) {
       this.warnUnknown(line, S);
@@ -149,12 +150,12 @@ export class SeoulFeed implements Feed {
       if (chain.loop) d = ((d % n) + n + n / 2) % n - n / 2; // shortest way around
       return d;
     };
-    const dest = r.bstatnNm ? normalizeStation(r.bstatnNm) : undefined;
+    const dest = r.bstatnNm ? on(r.bstatnNm) : undefined;
     // On a line with ends, the destination says which way the train is going. On loops it
     // doesn't (a train may go the long way round), so there the previous/next ids decide.
     const toDest = chain.loop ? undefined : this.towards(line, opt.chain, s, dest);
     // "99 운행중" rows are about a station up ahead; the train itself is at arvlMsg3.
-    const here = r.arvlCd === "99" ? idxOf(normalizeStation(r.arvlMsg3 ?? "")) : undefined;
+    const here = r.arvlCd === "99" ? idxOf(on(r.arvlMsg3 ?? "")) : undefined;
     let dir: Direction;
     if (here !== undefined && signed(here, s) !== 0) dir = signed(here, s) > 0 ? 1 : -1;
     else if (toDest !== undefined) {
@@ -228,6 +229,6 @@ export class SeoulFeed implements Feed {
     const key = `${line.name} ${name}`;
     if (this.unknown.has(key)) return;
     this.unknown.add(key);
-    console.warn(`unknown station: ${key} (add an alias in server/lines.ts normalizeStation?)`);
+    console.warn(`unknown station: ${key} (add an alias in server/lines.ts?)`);
   }
 }
