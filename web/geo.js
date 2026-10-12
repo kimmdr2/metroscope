@@ -89,8 +89,12 @@ export function slice(c, d1, d2) {
   return out;
 }
 
-/** A ribbon `width` meters wide around a polyline, as a closed polygon ring. */
+/**
+ * A ribbon around a polyline, as a closed polygon ring. `width` is meters, or a function of the
+ * fraction along the line (0 at the first point, 1 at the last) for tapered shapes.
+ */
 export function ribbon(coords, width) {
+  const widthAt = typeof width === "function" ? width : () => width;
   if (coords.length < 2) return null;
   const lat0 = rad(coords[0][1]);
   const mx = (R * Math.PI) / 180; // meters per degree latitude
@@ -110,7 +114,7 @@ export function ribbon(coords, width) {
     const len = Math.hypot(dx, dy) || 1;
     dx /= len;
     dy /= len;
-    const h = width / 2;
+    const h = widthAt(i / (pts.length - 1)) / 2;
     left.push(toLL([p[0] - dy * h, p[1] + dx * h]));
     right.push(toLL([p[0] + dy * h, p[1] - dx * h]));
   }

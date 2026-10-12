@@ -15,7 +15,7 @@ const HOME = { center: [126.985, 37.548], zoom: mobile ? 9.7 : 10.7, pitch: 52, 
 // speed implied by the feed's arrival countdown), but never past the next station.
 const RUN_SPEED = 11; // m/s
 // Train bodies, in meters. Width and height are exaggerated so they read at city zoom.
-const TRAIN = { length: 170, width: 34, height: 28 };
+const TRAIN = { length: 170, width: 34, height: 40 };
 const ZOOM_3D = 12.8; // dots hand over to 3D bodies around here
 const GAP_COLORS = { bunch: "#5eead4", ok: "#3f8f5c", wide: "#f59e0b", hole: "#ef4444" };
 // Trains are re-uploaded to the map at most this often; the map itself still renders every frame.
@@ -174,6 +174,48 @@ function legFeatures() {
 
 // ---------- map ----------
 
+/**
+ * The train marker: a navigation-style arrowhead pointing up (north), as a signed distance field
+ * so it can be tinted per line and outlined with a halo. Same encoding as MapLibre's glyphs.
+ */
+function arrowImage() {
+  const size = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  ctx.beginPath();
+  ctx.moveTo(32, 7); // nose
+  ctx.lineTo(51, 55);
+  ctx.lineTo(32, 44); // notch in the tail
+  ctx.lineTo(13, 55);
+  ctx.closePath();
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 4;
+  ctx.fill();
+  ctx.stroke(); // rounds the corners a little
+  const alpha = ctx.getImageData(0, 0, size, size).data;
+  const inside = (x, y) => alpha[(y * size + x) * 4 + 3] > 127;
+  const edges = [];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const v = inside(x, y);
+      if ((x > 0 && inside(x - 1, y) !== v) || (y > 0 && inside(x, y - 1) !== v)) edges.push([x, y]);
+    }
+  }
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let best = Infinity;
+      for (const [ex, ey] of edges) best = Math.min(best, (ex - x) ** 2 + (ey - y) ** 2);
+      const d = Math.sqrt(best) * (inside(x, y) ? -1 : 1);
+      const i = (y * size + x) * 4;
+      data[i] = data[i + 1] = data[i + 2] = 255;
+      data[i + 3] = Math.max(0, Math.min(255, 255 - 255 * (d / 8 + 0.25)));
+    }
+  }
+  return { width: size, height: size, data };
+}
+
 function createMap() {
   map = new maplibregl.Map({
     container: "map",
@@ -248,7 +290,8 @@ function addLayers() {
       geometry: { type: "Point", coordinates: s.ll },
     }))),
   });
-  for (const id of ["gaps", "ripples", "trains", "trains3d"]) map.addSource(id, { type: "geojson", data: empty() });
+  for (const id of ["gaps", "ripples", "trails", "trains", "trains3d"]) map.addSource(id, { type: "geojson", data: empty() });
+  map.addImage("train-arrow", arrowImage(), { sdf: true, pixelRatio: 2 });
 
   const lineLayout = { "line-join": "round", "line-cap": "round", "line-sort-key": ["get", "z"] };
   map.addLayer({
@@ -295,23 +338,48 @@ function addLayers() {
       "circle-pitch-alignment": "map",
     },
   });
+  // Fading tail behind each moving train, along the track: shows which way it's going at a glance.
+  // Wider than the line itself, so it reads as a fading band over a track of the same color.
   map.addLayer({
-    id: "train-glow", type: "circle", source: "trains", maxzoom: ZOOM_3D + 1,
+    id: "train-trail", type: "line", source: "trails",
+    layout: { "line-cap": "round", "line-join": "round" },
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 5, 12, 13],
-      "circle-blur": 1,
-      "circle-opacity": ["interpolate", ["linear"], ["zoom"], 8, 0.35, ZOOM_3D, 0.3, ZOOM_3D + 1, 0],
-      "circle-pitch-alignment": "map",
+      "line-color": ["get", "color"],
+      "line-width": byZoom(WIDTHS, (v) => v * 2.6 + 2),
+      "line-blur": byZoom(WIDTHS, (v) => v * 0.6),
+      // Same side as the arrow (right of travel); drawn in chain order, so flip for dir -1.
+      "line-offset": byZoom(WIDTHS, (v) => ["*", ["get", "dir"], v * 0.8 + 2]),
     },
   });
   map.addLayer({
-    id: "train-dot", type: "circle", source: "trains",
+    id: "train-glow", type: "circle", source: "trains", maxzoom: ZOOM_3D + 1,
     paint: {
-      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 2.2, 11, 3.6, ZOOM_3D, 5.5],
-      "circle-stroke-width": ["case", ["get", "express"], 2, 0.8],
-      "circle-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
-      "circle-stroke-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 8, 12, 18],
+      "circle-blur": 1,
+      "circle-opacity": ["interpolate", ["linear"], ["zoom"], 8, 0.4, ZOOM_3D, 0.35, ZOOM_3D + 1, 0],
       "circle-pitch-alignment": "map",
+    },
+  });
+  // Trains: arrows pointing the way they travel, outlined so they stand out from their own line.
+  map.addLayer({
+    id: "train-arrow", type: "symbol", source: "trains",
+    layout: {
+      "icon-image": "train-arrow",
+      "icon-size": ["interpolate", ["linear"], ["zoom"], 8, ["case", ["get", "express"], 0.4, 0.34], 10.5, ["case", ["get", "express"], 0.5, 0.42], 12, ["case", ["get", "express"], 0.7, 0.6], ZOOM_3D, ["case", ["get", "express"], 0.9, 0.78], 17, ["case", ["get", "express"], 1.4, 1.25]],
+      "icon-rotate": ["get", "bearing"],
+      // Each arrow keeps to the right of its direction of travel, so two trains passing at a
+      // station sit side by side instead of piling into one shape.
+      "icon-offset": [9, 0],
+      "icon-rotation-alignment": "map",
+      // Upright toward the camera: lying flat, arrows all but vanish in a tilted 3D view.
+      "icon-pitch-alignment": "viewport",
+      "icon-allow-overlap": true,
+      "icon-ignore-placement": true,
+      "symbol-sort-key": ["get", "z"],
+    },
+    paint: {
+      "icon-halo-width": ["case", ["get", "express"], 2.4, 1.6],
+      // Stays on above the 3D bodies when zoomed in, so the direction never disappears.
     },
   });
   map.addLayer({
@@ -319,8 +387,9 @@ function addLayers() {
     paint: {
       "fill-extrusion-height": ["get", "h"],
       "fill-extrusion-base": 0,
-      "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.4, 0, ZOOM_3D + 0.4, 0.95],
-      "fill-extrusion-vertical-gradient": true,
+      "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.4, 0, ZOOM_3D + 0.4, 1],
+      // Flat, full-strength color: the shaded gradient made trains as dark as the buildings.
+      "fill-extrusion-vertical-gradient": false,
     },
   });
   map.addLayer({
@@ -397,9 +466,11 @@ function applyFocus() {
   map.setPaintProperty("line-casing", "line-opacity", on(isLine, 0.85, 0.3));
   map.setPaintProperty("station-dot", "circle-opacity", on(isLine, 1, 0.25));
   map.setPaintProperty("station-dot", "circle-stroke-opacity", on(isLine, 1, 0.25));
-  map.setPaintProperty("train-dot", "circle-color", on(isLine, ["get", "color"], palette.dim));
-  map.setPaintProperty("train-dot", "circle-stroke-color", on(isLine, "#f4f7fa", "rgba(244,247,250,0.1)"));
-  map.setPaintProperty("train-glow", "circle-color", on(isLine, ["get", "color"], "rgba(0,0,0,0)"));
+  map.setPaintProperty("train-arrow", "icon-color", on(isLine, ["get", "color"], palette.dim));
+  map.setPaintProperty("train-arrow", "icon-halo-color", on(isLine, "#ffffff", "rgba(255,255,255,0.15)"));
+  // A colored glow reads on the dark map; on the light map a soft shadow lifts the train instead.
+  map.setPaintProperty("train-glow", "circle-color", on(isLine, ui === "light" ? "rgba(20,28,40,0.35)" : ["get", "color"], "rgba(0,0,0,0)"));
+  map.setPaintProperty("train-trail", "line-opacity", on(isLine, ["get", "o"], 0));
   map.setPaintProperty("train-3d", "fill-extrusion-color", on(isLine, ["get", "color"], palette.dim));
   map.setLayoutProperty("gaps", "visibility", mode === "gaps" ? "visible" : "none");
   map.setPaintProperty("gaps", "line-opacity", on(isLine, 1, 0.08));
@@ -576,7 +647,9 @@ function frame(now) {
     t.d = Math.abs(diff) > 4000 ? target : t.d + diff * (live ? k : Math.min(1, k * 3));
     t.d = wrapDist(c, t.d);
     if (t.id === selected && dt > 0) t.speed = (t.speed ?? 0) * 0.9 + Math.min(60, Math.abs(t.d - prev) / dt) * 0.1;
-    t.ll = pointAt(c, t.d).lngLat;
+    const p = pointAt(c, t.d);
+    t.ll = p.lngLat;
+    t.bearing = t.dir > 0 ? p.heading : p.heading + 180;
   }
 
   if (now - lastTrains >= TRAIN_FRAME_MS) {
@@ -619,16 +692,45 @@ function soundEvent(t) {
   return null;
 }
 
+/** About how many meters one screen pixel covers right now. */
+const metersPerPixel = () => (78271.517 * Math.cos((map.getCenter().lat * Math.PI) / 180)) / 2 ** map.getZoom();
+
+// Tail pieces behind a train: [from, to] as fractions of the tail length, and their opacity.
+const TRAIL = [[0, 0.3, 0.55], [0.3, 0.65, 0.3], [0.65, 1, 0.12]];
+
 function renderTrains() {
   const points = [];
+  const trails = [];
+  // ~45px of tail at any zoom, but never more than 1.5km of track.
+  const tail = Math.min(1500, 45 * metersPerPixel());
+  const lineOrder = [...lines.keys()];
   for (const t of trains.values()) {
+    const color = lines.get(t.line).display;
     points.push({
       type: "Feature",
-      properties: { id: t.id, line: t.line, color: lines.get(t.line).display, express: t.express },
+      properties: { id: t.id, line: t.line, color, express: t.express, bearing: t.bearing, z: lineOrder.length - lineOrder.indexOf(t.line) },
       geometry: { type: "Point", coordinates: t.ll },
     });
+    if (!t.moving || stale) continue;
+    const c = chainOf(t);
+    for (const [a, b, o] of TRAIL) {
+      // Behind the train: lower distances when heading up the chain, higher when heading down.
+      let d1 = t.dir > 0 ? t.d - tail * b : t.d + tail * a;
+      let d2 = t.dir > 0 ? t.d - tail * a : t.d + tail * b;
+      if (c.loop) {
+        const shift = d1 < 0 ? c.total : d1 >= c.total ? -c.total : 0;
+        d1 += shift;
+        d2 += shift;
+      } else {
+        d1 = Math.max(0, d1);
+        d2 = Math.min(c.total, d2);
+      }
+      if (d2 - d1 < 5) continue;
+      trails.push({ type: "Feature", properties: { line: t.line, color, o, dir: t.dir }, geometry: { type: "LineString", coordinates: slice(c, d1, d2) } });
+    }
   }
   map.getSource("trains").setData(fc(points));
+  map.getSource("trails").setData(fc(trails));
 
   if (map.getZoom() < ZOOM_3D - 0.5) return;
   const bounds = map.getBounds();
@@ -645,7 +747,9 @@ function renderTrains() {
     // Evenly spaced samples rather than raw track vertices, so a kink in the track can't twist the body.
     const centerline = [];
     for (let i = 0; i <= 6; i++) centerline.push(pointAt(c, d1 + ((d2 - d1) * i) / 6).lngLat);
-    const ring = ribbon(centerline, TRAIN.width);
+    // Taper the leading end into a nose so the direction shows up close too.
+    const nose = (f) => (t.dir > 0 ? f : 1 - f);
+    const ring = ribbon(centerline, (f) => TRAIN.width * (nose(f) < 0.8 ? 1 : 1 - ((nose(f) - 0.8) / 0.2) * 0.75));
     if (!ring) continue;
     bodies.push({
       type: "Feature",
@@ -767,7 +871,7 @@ const tip = new maplibregl.Popup({ closeButton: false, closeOnClick: false, clas
 
 function trainAt(point) {
   const box = [[point.x - 8, point.y - 8], [point.x + 8, point.y + 8]];
-  const hit = map.queryRenderedFeatures(box, { layers: ["train-3d", "train-dot"] })[0];
+  const hit = map.queryRenderedFeatures(box, { layers: ["train-3d", "train-arrow"] })[0];
   return hit && trains.get(hit.properties.id);
 }
 function stationAt(point) {
