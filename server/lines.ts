@@ -3,7 +3,7 @@ export interface LineDef {
   name: string;
   color: string;
   loop: boolean;
-  /** Stations in 외선 (dir = +1) order */
+  /** Stations in dir = +1 order (2호선: 내선, clockwise) */
   stations: string[];
 }
 

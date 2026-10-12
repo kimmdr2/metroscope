@@ -8,15 +8,31 @@ import { LINE2 } from "./lines.js";
 import type { Feed, Snapshot } from "./types.js";
 
 const apiKey = process.env.SEOUL_API_KEY;
+// Daily quota is 1,000 calls. Polling only during service hours (05:30–01:00, 19.5h)
+// at 75s comes to ~936 calls/day.
 const feed: Feed = apiKey
-  ? new SeoulFeed(LINE2, apiKey, Number(process.env.POLL_MS ?? 20000))
+  ? new SeoulFeed(LINE2, apiKey, Number(process.env.POLL_MS ?? 75000))
   : new MockFeed(LINE2, Number(process.env.MOCK_SPEED ?? 8));
+
+/** True between 01:00 and 05:30 KST, when no trains run. */
+function isNightPause() {
+  const [h, m] = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .format(new Date())
+    .split(":")
+    .map(Number);
+  const minutes = h * 60 + m;
+  return minutes >= 60 && minutes < 5 * 60 + 30;
+}
 
 // One upstream poll is fanned out to every browser over SSE, so viewers don't cost API calls.
 const clients = new Set<Response>();
 let latest: Snapshot | undefined;
 
 async function tick() {
+  if (apiKey && isNightPause()) {
+    setTimeout(tick, 60_000);
+    return;
+  }
   try {
     latest = await feed.next();
     const msg = `data: ${JSON.stringify(latest)}\n\n`;

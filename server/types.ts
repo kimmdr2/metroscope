@@ -1,4 +1,4 @@
-/** +1 = 외선 (clockwise in station order), -1 = 내선 */
+/** +1 = 내선 (station-list order, clockwise), -1 = 외선 */
 export type Direction = 1 | -1;
 
 export interface Train {
