@@ -21,6 +21,7 @@ const GAP_COLORS = { bunch: "#5eead4", ok: "#3f8f5c", wide: "#f59e0b", hole: "#e
 // Trains are re-uploaded to the map at most this often; the map itself still renders every frame.
 const TRAIN_FRAME_MS = mobile || coarse ? 50 : 33;
 const THEME_KEY = "metroscope:theme";
+const MERGE_M = 450;
 
 // ---------- state ----------
 
@@ -48,6 +49,8 @@ let ui;
 let board = null;
 /** The follow cam waits until camera animations we started (zoom-in, 2D/3D switch) are done. */
 let cameraBusyUntil = 0;
+/** True while the user is dragging/zooming/rotating the map. */
+let userMoving = false;
 function ease(opts) {
   cameraBusyUntil = performance.now() + (opts.duration ?? 1000) + 50;
   map.easeTo(opts);
@@ -101,21 +104,29 @@ async function loadNetwork() {
   const net = await (await fetch(new URL("network.json", import.meta.url))).json();
   for (const l of net.lines) lines.set(l.id, { ...l, chains: l.chains.map(prepareChain) });
 
-  // One dot and label per station, merging lines that share it.
-  const merged = [];
-  for (const l of lines.values()) {
-    for (const [name, ll] of Object.entries(l.stations)) {
-      const m = merged.find((s) => s.name === name && dist(s.ll, ll) < 700);
-      if (m) {
-        m.lines.push(l.id);
-        m.pts.push(ll);
-      } else merged.push({ name, ll, lines: [l.id], pts: [ll] });
+  // Same-named stops on different lines are one station only when they're close: 서울역's
+  // platforms span ~500m, but 신촌 on 2호선 and on 경의중앙선 are 630m apart and separate stations.
+  // Clusters chain through near neighbors; each line keeps its own dot on its own track.
+  const dots = [];
+  for (const l of lines.values()) for (const [name, ll] of Object.entries(l.stations)) dots.push({ name, line: l.id, ll });
+  const parent = dots.map((_, i) => i);
+  const root = (i) => (parent[i] === i ? i : (parent[i] = root(parent[i])));
+  for (let i = 0; i < dots.length; i++) {
+    for (let j = i + 1; j < dots.length; j++) {
+      if (dots[i].name === dots[j].name && dist(dots[i].ll, dots[j].ll) < MERGE_M) parent[root(i)] = root(j);
     }
   }
-  stations = merged.map((s) => ({
-    ...s,
-    ll: [s.pts.reduce((a, p) => a + p[0], 0) / s.pts.length, s.pts.reduce((a, p) => a + p[1], 0) / s.pts.length],
-  }));
+  const clusters = new Map();
+  for (let i = 0; i < dots.length; i++) {
+    if (!clusters.has(root(i))) clusters.set(root(i), []);
+    clusters.get(root(i)).push(dots[i]);
+  }
+  stations = [...clusters.values()].map((members) => {
+    // The label sits on a real dot (the one nearest the middle), never in the empty space between.
+    const mid = [members.reduce((a, m) => a + m.ll[0], 0) / members.length, members.reduce((a, m) => a + m.ll[1], 0) / members.length];
+    const anchor = members.reduce((b, m) => (dist(m.ll, mid) < dist(b.ll, mid) ? m : b));
+    return { name: anchor.name, ll: anchor.ll, lines: [...new Set(members.map((m) => m.line))], dots: members };
+  });
 }
 
 /**
@@ -191,7 +202,13 @@ function createMap() {
     ease({ ...HOME, duration: 2800, easing: (t) => 1 - (1 - t) ** 3 });
   });
 
-  map.on("dragstart", () => setFollow(false));
+  // Moving the map by hand only pauses the chase cam; following ends with its button alone.
+  map.on("movestart", (e) => e.originalEvent && (userMoving = true));
+  map.on("moveend", () => {
+    if (!userMoving) return;
+    userMoving = false;
+    cameraBusyUntil = Math.max(cameraBusyUntil, performance.now() + 800);
+  });
   map.on("mousemove", onHover);
   map.on("mouseout", () => tip.remove());
   map.on("click", onClick);
@@ -207,17 +224,27 @@ const OFFSET = byZoom(WIDTHS, (v) => ["*", ["get", "o"], v + 1]);
 
 function addLayers() {
   map.addSource("lines", { type: "geojson", data: fc(legFeatures()) });
+  // A dot per line at each station (on that line's track), a label per station.
   map.addSource("stations", {
     type: "geojson",
-    data: fc(stations.map((s) => ({
+    data: fc(stations.flatMap((s) => s.dots.map((d) => ({
       type: "Feature",
       properties: {
         name: s.name,
+        line: d.line,
         lines: `,${s.lines.join(",")},`,
         transfer: s.lines.length > 1,
-        cd: lineColor(lines.get(s.lines[0]).color, "dark"),
-        cl: lineColor(lines.get(s.lines[0]).color, "light"),
+        cd: lineColor(lines.get(d.line).color, "dark"),
+        cl: lineColor(lines.get(d.line).color, "light"),
       },
+      geometry: { type: "Point", coordinates: d.ll },
+    })))),
+  });
+  map.addSource("station-labels", {
+    type: "geojson",
+    data: fc(stations.map((s) => ({
+      type: "Feature",
+      properties: { name: s.name, lines: `,${s.lines.join(",")},`, transfer: s.lines.length > 1 },
       geometry: { type: "Point", coordinates: s.ll },
     }))),
   });
@@ -308,7 +335,7 @@ function addLayers() {
     },
   });
   const label = (minzoom, filter, size) => ({
-    type: "symbol", source: "stations", minzoom, filter,
+    type: "symbol", source: "station-labels", minzoom, filter,
     layout: {
       "text-field": ["get", "name"],
       "text-font": ["Noto Sans Regular"],
@@ -368,8 +395,8 @@ function applyFocus() {
   map.setPaintProperty("line-core", "line-opacity", on(isLine, dimLines ? 0.22 : 1, 0.12));
   map.setPaintProperty("line-glow", "line-opacity", on(isLine, dimLines ? 0.05 : palette.glow, 0.03));
   map.setPaintProperty("line-casing", "line-opacity", on(isLine, 0.85, 0.3));
-  map.setPaintProperty("station-dot", "circle-opacity", on(hasLine, 1, 0.25));
-  map.setPaintProperty("station-dot", "circle-stroke-opacity", on(hasLine, 1, 0.25));
+  map.setPaintProperty("station-dot", "circle-opacity", on(isLine, 1, 0.25));
+  map.setPaintProperty("station-dot", "circle-stroke-opacity", on(isLine, 1, 0.25));
   map.setPaintProperty("train-dot", "circle-color", on(isLine, ["get", "color"], palette.dim));
   map.setPaintProperty("train-dot", "circle-stroke-color", on(isLine, "#f4f7fa", "rgba(244,247,250,0.1)"));
   map.setPaintProperty("train-glow", "circle-color", on(isLine, ["get", "color"], "rgba(0,0,0,0)"));
@@ -461,7 +488,7 @@ function applySnapshot(snap) {
     }
   }
   for (const id of trains.keys()) if (!seen.has(id)) trains.delete(id);
-  if (selected && !trains.has(selected)) selectTrain(null);
+  if (selected && !trains.has(selected)) selectTrain(null, true);
 
   // Live arrivals were collected over the whole polling interval; spread them back out.
   for (const a of snap.arrivals) setTimeout(() => onArrival(a), Math.random() * snap.intervalMs * (snap.source === "live" ? 0.85 : 1));
@@ -565,7 +592,7 @@ function frame(now) {
     const t = trains.get(selected);
     if (t) {
       // Chase-cam, but let camera animations (the zoom-in, 2D/3D switch) finish first.
-      if (now > cameraBusyUntil) {
+      if (now > cameraBusyUntil && !userMoving) {
         const c = map.getCenter();
         map.jumpTo({ center: [c.lng + (t.ll[0] - c.lng) * 0.12, c.lat + (t.ll[1] - c.lat) * 0.12] });
       }
@@ -777,7 +804,7 @@ function onHover(e) {
 function onClick(e) {
   // On touch screens the hover tooltip would otherwise stay up after a tap.
   if (coarse) tip.remove();
-  const t = trainAt(e.point);
+  const t = !following && trainAt(e.point);
   if (t) {
     selectTrain(t.id);
     return;
@@ -785,14 +812,17 @@ function onClick(e) {
   const s = stationAt(e.point);
   if (s) {
     openBoard(s.properties.name, s.properties.lines.split(",").filter(Boolean));
-    ease({ center: s.geometry.coordinates, zoom: Math.max(map.getZoom(), 14.5), duration: 1200 });
+    // While following, the camera stays on the train; the board still opens.
+    if (!following) ease({ center: s.geometry.coordinates, zoom: Math.max(map.getZoom(), 14.5), duration: 1200 });
     return;
   }
-  selectTrain(null);
   closeBoard();
+  if (!following) selectTrain(null);
 }
 
-function selectTrain(id) {
+/** Selects a train (or none). While following, only `force` (the train left service) changes it. */
+function selectTrain(id, force = false) {
+  if (following && !force && id !== selected) return;
   selected = id;
   if (!id) setFollow(false);
   else closeBoard();
@@ -817,7 +847,9 @@ function updateTrainCard() {
 function setFollow(on) {
   following = on && !!selected;
   $("tc-follow").setAttribute("aria-pressed", String(following));
-  $("tc-follow").textContent = following ? "따라가는 중" : "따라가기";
+  $("tc-follow").textContent = following ? "따라가기 취소" : "따라가기";
+  // The card can't be closed mid-follow: the cancel button is the way out.
+  $("tc-close").hidden = following;
   if (following) {
     const t = trains.get(selected);
     t.arrivedAt = undefined;
@@ -828,7 +860,7 @@ function setFollow(on) {
 // ---------- station board ----------
 
 function openBoard(name, lineIds) {
-  selectTrain(null);
+  if (!following) selectTrain(null);
   board = { name, lines: lineIds, line: focus && lineIds.includes(focus) ? focus : lineIds[0], data: undefined };
   $("sc-title").textContent = name;
   $("sc-lines").innerHTML = lineIds
@@ -943,8 +975,9 @@ function wireUi() {
   $("clear-focus").addEventListener("click", () => setFocus(focus));
   $("stat-max").addEventListener("click", () => maxGap && fitTo(slice(maxGap.chain, maxGap.from, maxGap.to), 14));
   $("home").addEventListener("click", () => {
-    setFollow(false);
-    ease({ ...HOME, pitch: tilted ? HOME.pitch : 0, bearing: tilted ? HOME.bearing : 0, duration: 1600 });
+    const view = { ...HOME, pitch: tilted ? HOME.pitch : 0, bearing: tilted ? HOME.bearing : 0, duration: 1600 };
+    // While following, zoom out around the train instead of leaving it.
+    ease(following && trains.get(selected) ? { ...view, center: trains.get(selected).ll } : view);
   });
   $("tilt").addEventListener("click", () => setTilt(!tilted));
   $("sound").addEventListener("click", async (e) => {
@@ -980,7 +1013,7 @@ function wireUi() {
   addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (board) closeBoard();
-    else if (selected) selectTrain(null);
+    else if (selected && !following) selectTrain(null);
     else if (focus) setFocus(focus, false);
   });
 }
