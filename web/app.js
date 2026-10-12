@@ -1,7 +1,7 @@
 // metroscope client: every Seoul-area line on a real 3D map, trains gliding along the actual
 // track, headway gaps colored, arrivals ringing.
 
-import * as maplibregl from "/vendor/maplibre-gl/maplibre-gl.mjs";
+import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
 import { baseStyle } from "./basemap.js";
 import { dist, distOfPos, posOfDist, pointAt, prepareChain, ribbon, slice, wrapDist } from "./geo.js";
 import { chime, setSound } from "./sound.js";
@@ -73,7 +73,7 @@ const stationName = (c, pos) => c.stations[Math.round(pos) % c.n];
 // ---------- network ----------
 
 async function loadNetwork() {
-  const net = await (await fetch("/network.json")).json();
+  const net = await (await fetch(new URL("network.json", import.meta.url))).json();
   for (const l of net.lines) {
     lines.set(l.id, { ...l, display: displayColor(l.color), chains: l.chains.map(prepareChain) });
   }

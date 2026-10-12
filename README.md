@@ -79,7 +79,9 @@ web/                 빌드 없는 순수 JS (ES modules)
   sound.js           Web Audio 도착음
 ```
 
-지도 렌더링은 [MapLibre GL JS](https://maplibre.org)(npm 의존성, 서버가 `/vendor/maplibre-gl`로 제공), 베이스맵 타일은 [OpenFreeMap](https://openfreemap.org), 지형 음영은 공개 Terrarium DEM 타일입니다. 모두 키가 필요 없습니다.
+정적 파일은 서버가 `/v/<내용 해시>/` 아래에서 제공합니다. Cloudflare가 `.js`/`.css`의 브라우저 캐시를 4시간으로 늘려버려서, 경로가 그대로면 배포 직후 재방문자가 새 HTML과 옛 스크립트를 섞어 받게 되기 때문입니다. 배포마다 경로가 바뀌므로 해시 경로 아래 파일은 영구 캐시해도 안전합니다.
+
+지도 렌더링은 [MapLibre GL JS](https://maplibre.org)(npm 의존성, 같은 해시 경로 아래 `vendor/maplibre-gl`로 제공), 베이스맵 타일은 [OpenFreeMap](https://openfreemap.org), 지형 음영은 공개 Terrarium DEM 타일입니다. 모두 키가 필요 없습니다.
 
 ## 알려진 한계
 
