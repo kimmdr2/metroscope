@@ -2,49 +2,96 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>metroscope</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0f14" />
+  <title>metroscope · 수도권 지하철 실시간 지도</title>
+  <meta name="description" content="수도권 전철 전 노선의 열차 위치와 배차 간격을 실제 지도 위에 3D로 보여줍니다." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+KR:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/vendor/maplibre-gl/maplibre-gl.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main>
-    <svg id="map" viewBox="0 0 1000 1000" role="img" aria-label="2호선 실시간 열차 위치">
-      <g id="tracks"></g>
-      <g id="gaps"></g>
-      <g id="stations"></g>
-      <g id="ripples"></g>
-      <g id="trains"></g>
-      <g id="center">
-        <text id="line-name" x="500" y="480" text-anchor="middle">2호선</text>
-        <text id="clock" x="500" y="530" text-anchor="middle">--:--:--</text>
-        <text id="hint" x="500" y="565" text-anchor="middle">바깥 외선 · 안쪽 내선</text>
-      </g>
-    </svg>
+  <div id="map" aria-label="수도권 지하철 실시간 지도"></div>
 
-    <aside>
-      <header>
+  <aside id="panel" class="glass" data-open="false">
+    <button id="sheet-handle" type="button" aria-label="패널 펼치기"><span></span></button>
+
+    <header>
+      <div class="brand">
         <h1>metroscope</h1>
         <span id="source" class="badge">연결 중</span>
-      </header>
+      </div>
+      <div class="clock"><time id="clock">--:--:--</time><span id="date"></span></div>
+    </header>
 
-      <dl class="stats">
-        <div><dt>운행 중</dt><dd id="stat-trains">–</dd></div>
-        <div><dt>평균 간격</dt><dd id="stat-avg">–</dd></div>
-        <div class="wide"><dt>가장 긴 공백</dt><dd id="stat-max">–</dd></div>
-      </dl>
+    <dl class="stats">
+      <div><dt>운행 중</dt><dd id="stat-trains">–</dd></div>
+      <div><dt>평균 간격</dt><dd id="stat-avg">–</dd></div>
+      <div class="wide">
+        <dt>가장 긴 공백</dt>
+        <dd><button id="stat-max" type="button" class="linklike" disabled>–</button></dd>
+      </div>
+    </dl>
 
-      <button id="sound" type="button" aria-pressed="false">🔈 소리 켜기</button>
+    <div class="controls">
+      <div class="segmented" role="radiogroup" aria-label="보기">
+        <button type="button" role="radio" data-mode="lines" aria-checked="true">노선</button>
+        <button type="button" role="radio" data-mode="gaps" aria-checked="false">배차 간격</button>
+      </div>
+      <div class="buttons">
+        <button id="sound" type="button" class="chip" aria-pressed="false" title="도착할 때마다 소리 (화면 위쪽일수록 높은 음)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
+          <span>소리</span>
+        </button>
+        <button id="tilt" type="button" class="chip" aria-pressed="true" title="3D 시점 (기울기·건물)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>
+          <span>3D</span>
+        </button>
+        <button id="home" type="button" class="chip" title="수도권 전체 보기">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+          <span>전체</span>
+        </button>
+      </div>
+    </div>
 
-      <ul class="legend">
-        <li><i style="--c: var(--gap-bunch)"></i>몰림 (1역 미만)</li>
-        <li><i style="--c: var(--gap-ok)"></i>정상</li>
-        <li><i style="--c: var(--gap-wide)"></i>넓음 (4역+)</li>
-        <li><i style="--c: var(--gap-hole)"></i>공백 (6역+)</li>
-      </ul>
-    </aside>
-  </main>
+    <ul id="legend" class="legend" hidden>
+      <li><i style="--c: var(--gap-bunch)"></i>몰림 <small>1역 미만</small></li>
+      <li><i style="--c: var(--gap-ok)"></i>정상</li>
+      <li><i style="--c: var(--gap-wide)"></i>넓음 <small>4역+</small></li>
+      <li><i style="--c: var(--gap-hole)"></i>공백 <small>6역+</small></li>
+    </ul>
+
+    <section class="lines-section">
+      <div class="section-head">
+        <h2>노선</h2>
+        <button id="clear-focus" type="button" class="linklike" hidden>전체 보기</button>
+      </div>
+      <ul id="lines" class="lines"></ul>
+    </section>
+
+    <footer>
+      열차 위치 <a href="https://data.seoul.go.kr" target="_blank" rel="noopener">서울 열린데이터광장</a> ·
+      노선 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>
+    </footer>
+  </aside>
+
+  <div id="train-card" class="glass" hidden>
+    <div class="train-head">
+      <span id="tc-badge" class="line-badge"></span>
+      <div>
+        <strong id="tc-title"></strong>
+        <span id="tc-sub"></span>
+      </div>
+      <button id="tc-close" type="button" class="icon" aria-label="닫기">×</button>
+    </div>
+    <p id="tc-status"></p>
+    <button id="tc-follow" type="button" class="chip wide" aria-pressed="false">따라가기</button>
+  </div>
+
+  <div id="loading" class="loading"><span></span>지도를 불러오는 중</div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>

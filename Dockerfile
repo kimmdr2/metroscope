@@ -6,6 +6,7 @@ RUN npm ci && npm cache clean --force
 
 COPY server ./server
 COPY web ./web
+COPY data ./data
 COPY tsconfig.json ./
 
 USER node
