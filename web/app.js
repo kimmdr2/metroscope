@@ -1,33 +1,37 @@
 // metroscope client: every Seoul-area line on a real 3D map, trains gliding along the actual
-// track, headway gaps colored, arrivals ringing.
+// track, headway gaps colored, station boards, and the sound of the train you're following.
 
 import * as maplibregl from "./vendor/maplibre-gl/maplibre-gl.mjs";
-import { baseStyle } from "./basemap.js";
+import { applyPalette, baseStyle, paletteFor } from "./basemap.js";
 import { dist, distOfPos, posOfDist, pointAt, prepareChain, ribbon, slice, wrapDist } from "./geo.js";
-import { chime, setSound } from "./sound.js";
+import { followSound, setSound, stopAll } from "./sound.js";
 
 const $ = (id) => document.getElementById(id);
 const mobile = matchMedia("(max-width: 720px)").matches;
+const coarse = matchMedia("(pointer: coarse)").matches;
 
 const HOME = { center: [126.985, 37.548], zoom: mobile ? 9.7 : 10.7, pitch: 52, bearing: -17 };
-// Live data arrives every ~75s; between updates moving trains advance at a typical speed,
-// but never past the next station, where they'll probably stop.
+// Live data arrives every ~75s; between updates moving trains advance at a typical speed (or the
+// speed implied by the feed's arrival countdown), but never past the next station.
 const RUN_SPEED = 11; // m/s
 // Train bodies, in meters. Width and height are exaggerated so they read at city zoom.
 const TRAIN = { length: 170, width: 34, height: 28 };
 const ZOOM_3D = 12.8; // dots hand over to 3D bodies around here
 const GAP_COLORS = { bunch: "#5eead4", ok: "#3f8f5c", wide: "#f59e0b", hole: "#ef4444" };
-const DIM = "#2a323c";
+// Trains are re-uploaded to the map at most this often; the map itself still renders every frame.
+const TRAIN_FRAME_MS = mobile || coarse ? 50 : 33;
+const THEME_KEY = "metroscope:theme";
 
 // ---------- state ----------
 
-/** id -> line, with chains prepared for distance lookups and a display color for the dark map */
+/** id -> line, with chains prepared for distance lookups and a display color for the current theme */
 const lines = new Map();
-/** id -> { line, chain, dir, d (shown, meters), baseD, basePos, v (m/s, signed), moving, dest, express, ll } */
+/** id -> { line, chain, dir, d (shown, meters), baseD, basePos, v (m/s), moving, dest, express, eta, etaD, ll } */
 const trains = new Map();
 let stations = [];
 let snapshot = null;
 let receivedAt = 0;
+let stale = false;
 let mode = "lines";
 let focus = null;
 let selected = null;
@@ -37,11 +41,29 @@ let gaps = [];
 let ripples = [];
 let map;
 let ready = false;
+let theme = readPref();
+let palette;
+let ui;
+/** Open station board: { name, lines, line, data } */
+let board = null;
 /** The follow cam waits until camera animations we started (zoom-in, 2D/3D switch) are done. */
 let cameraBusyUntil = 0;
 function ease(opts) {
   cameraBusyUntil = performance.now() + (opts.duration ?? 1000) + 50;
   map.easeTo(opts);
+}
+
+function readPref() {
+  try {
+    return localStorage.getItem(THEME_KEY) ?? "auto";
+  } catch {
+    return "auto";
+  }
+}
+function savePref(v) {
+  try {
+    localStorage.setItem(THEME_KEY, v);
+  } catch {}
 }
 
 // ---------- helpers ----------
@@ -50,19 +72,22 @@ function hexToRgb(hex) {
   const n = parseInt(hex.slice(1), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
+const rgbToHex = (rgb) => `#${rgb.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
 const lin = (c) => ((c /= 255) <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 const luminance = (hex) => {
   const [r, g, b] = hexToRgb(hex).map(lin);
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 };
-/** Very dark line colors (1호선 navy, 경강선) get lifted so they read on the dark map. */
-function displayColor(hex) {
-  if (luminance(hex) >= 0.12) return hex;
-  const [r, g, b] = hexToRgb(hex).map((c) => Math.round(c + (255 - c) * 0.32));
-  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+/** Official line colors, nudged so they read on the map: very dark ones lifted at night, very light ones deepened by day. */
+function lineColor(hex, theme) {
+  const L = luminance(hex);
+  if (theme === "dark" && L < 0.12) return rgbToHex(hexToRgb(hex).map((c) => c + (255 - c) * 0.32));
+  if (theme === "light" && L > 0.42) return rgbToHex(hexToRgb(hex).map((c) => c * 0.8));
+  return hex;
 }
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const badgeHtml = (line) =>
-  `<span class="line-badge${luminance(line.color) > 0.4 ? " dark-text" : ""}" style="--c:${line.color}">${line.short}</span>`;
+  `<span class="line-badge${luminance(line.color) > 0.4 ? " dark-text" : ""}" style="--c:${line.color}">${esc(line.short)}</span>`;
 
 const kst = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
 const kstDate = new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "long", day: "numeric", weekday: "short" });
@@ -74,9 +99,7 @@ const stationName = (c, pos) => c.stations[Math.round(pos) % c.n];
 
 async function loadNetwork() {
   const net = await (await fetch(new URL("network.json", import.meta.url))).json();
-  for (const l of net.lines) {
-    lines.set(l.id, { ...l, display: displayColor(l.color), chains: l.chains.map(prepareChain) });
-  }
+  for (const l of net.lines) lines.set(l.id, { ...l, chains: l.chains.map(prepareChain) });
 
   // One dot and label per station, merging lines that share it.
   const merged = [];
@@ -95,12 +118,55 @@ async function loadNetwork() {
   }));
 }
 
+/**
+ * One feature per station-to-station leg. Where two lines share a leg (경의중앙·경춘 회기~상봉,
+ * 서해·경의중앙 일산~대곡, 4호선·수인분당 안산~오이도…) they're drawn side by side via an offset.
+ */
+function legFeatures() {
+  const lineList = [...lines.values()];
+  const legs = [];
+  lineList.forEach((l, li) =>
+    l.chains.forEach((c) => {
+      const count = c.loop ? c.n : c.n - 1;
+      for (let i = 0; i < count; i++) {
+        const end = c.loop && i === c.n - 1 ? c.path.length - 1 : c.at[i + 1];
+        const coords = c.path.slice(c.at[i], end + 1);
+        legs.push({ line: l.id, z: lineList.length - li, a: c.stations[i], b: c.stations[(i + 1) % c.n], coords, mid: coords[coords.length >> 1], o: 0 });
+      }
+    }),
+  );
+  const groups = new Map();
+  for (const g of legs) {
+    const key = [g.a, g.b].sort().join("|");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(g);
+  }
+  for (const [key, group] of groups) {
+    const near = group.filter((g) => dist(g.mid, group[0].mid) < 250);
+    const ids = [...new Set(near.map((g) => g.line))];
+    if (ids.length < 2) continue;
+    const first = key.split("|")[0];
+    for (const g of near) {
+      const o = ids.indexOf(g.line) - (ids.length - 1) / 2;
+      g.o = g.a === first ? o : -o; // offsets are relative to drawing direction
+    }
+  }
+  return legs.map((g) => {
+    const l = lines.get(g.line);
+    return {
+      type: "Feature",
+      properties: { line: g.line, z: g.z, o: g.o, cd: lineColor(l.color, "dark"), cl: lineColor(l.color, "light") },
+      geometry: { type: "LineString", coordinates: g.coords },
+    };
+  });
+}
+
 // ---------- map ----------
 
 function createMap() {
   map = new maplibregl.Map({
     container: "map",
-    style: baseStyle(),
+    style: baseStyle(palette),
     center: HOME.center,
     zoom: HOME.zoom - 0.6,
     pitch: 0,
@@ -119,7 +185,7 @@ function createMap() {
   map.on("load", () => {
     addLayers();
     ready = true;
-    applyFocus();
+    applyTheme();
     $("loading").classList.add("done");
     // Tilt into the city.
     ease({ ...HOME, duration: 2800, easing: (t) => 1 - (1 - t) ** 3 });
@@ -133,17 +199,14 @@ function createMap() {
 
 const empty = () => ({ type: "FeatureCollection", features: [] });
 const fc = (features) => ({ type: "FeatureCollection", features });
+// Zoom curves must be the top-level expression, so variants are built from the stops.
+const byZoom = (stops, f = (v) => v) => ["interpolate", ["exponential", 1.5], ["zoom"], ...stops.flatMap(([z, v]) => [z, f(v)])];
+const WIDTHS = [[8, 1.2], [11, 2.6], [14, 5], [17, 10]];
+// Shared legs sit one line-width (plus a hair) apart.
+const OFFSET = byZoom(WIDTHS, (v) => ["*", ["get", "o"], v + 1]);
 
 function addLayers() {
-  const lineList = [...lines.values()];
-  map.addSource("lines", {
-    type: "geojson",
-    data: fc(lineList.flatMap((l, i) => l.chains.map((c) => ({
-      type: "Feature",
-      properties: { line: l.id, color: l.display, z: lineList.length - i },
-      geometry: { type: "LineString", coordinates: c.path },
-    })))),
-  });
+  map.addSource("lines", { type: "geojson", data: fc(legFeatures()) });
   map.addSource("stations", {
     type: "geojson",
     data: fc(stations.map((s) => ({
@@ -152,43 +215,37 @@ function addLayers() {
         name: s.name,
         lines: `,${s.lines.join(",")},`,
         transfer: s.lines.length > 1,
-        color: lines.get(s.lines[0]).display,
+        cd: lineColor(lines.get(s.lines[0]).color, "dark"),
+        cl: lineColor(lines.get(s.lines[0]).color, "light"),
       },
       geometry: { type: "Point", coordinates: s.ll },
     }))),
   });
   for (const id of ["gaps", "ripples", "trains", "trains3d"]) map.addSource(id, { type: "geojson", data: empty() });
 
-  // Zoom curves must be the top-level expression, so variants are built from the stops.
-  const byZoom = (stops, f = (v) => v) => ["interpolate", ["exponential", 1.5], ["zoom"], ...stops.flatMap(([z, v]) => [z, f(v)])];
-  const widths = [[8, 1.2], [11, 2.6], [14, 5], [17, 10]];
-  const lineWidth = byZoom(widths);
+  const lineLayout = { "line-join": "round", "line-cap": "round", "line-sort-key": ["get", "z"] };
   map.addLayer({
-    id: "line-glow", type: "line", source: "lines",
-    layout: { "line-join": "round", "line-cap": "round", "line-sort-key": ["get", "z"] },
+    id: "line-glow", type: "line", source: "lines", layout: lineLayout,
     paint: {
-      "line-color": ["get", "color"],
       "line-width": ["interpolate", ["linear"], ["zoom"], 8, 5, 12, 12, 16, 28],
       "line-blur": ["interpolate", ["linear"], ["zoom"], 8, 4, 16, 16],
-      "line-opacity": 0.2,
+      "line-offset": OFFSET,
     },
   });
   map.addLayer({
-    id: "line-casing", type: "line", source: "lines",
-    layout: { "line-join": "round", "line-cap": "round", "line-sort-key": ["get", "z"] },
-    paint: { "line-color": "#0b0f14", "line-width": byZoom(widths, (v) => v + 2.5), "line-opacity": 0.85 },
+    id: "line-casing", type: "line", source: "lines", layout: lineLayout,
+    paint: { "line-width": byZoom(WIDTHS, (v) => v + 2.5), "line-offset": OFFSET },
   });
   map.addLayer({
-    id: "line-core", type: "line", source: "lines",
-    layout: { "line-join": "round", "line-cap": "round", "line-sort-key": ["get", "z"] },
-    paint: { "line-color": ["get", "color"], "line-width": lineWidth },
+    id: "line-core", type: "line", source: "lines", layout: lineLayout,
+    paint: { "line-width": byZoom(WIDTHS), "line-offset": OFFSET },
   });
   map.addLayer({
     id: "gaps", type: "line", source: "gaps",
     layout: { "line-join": "round", "line-cap": "round", visibility: "none" },
     paint: {
       "line-color": ["get", "color"],
-      "line-width": ["interpolate", ["exponential", 1.5], ["zoom"], 8, 1.6, 11, 3, 14, 6, 17, 11],
+      "line-width": byZoom([[8, 1.6], [11, 3], [14, 6], [17, 11]]),
       "line-offset": byZoom([[8, 1.2], [11, 2.4], [14, 5], [17, 9]], (v) => ["*", ["get", "dir"], v]),
     },
   });
@@ -196,8 +253,6 @@ function addLayers() {
     id: "station-dot", type: "circle", source: "stations", minzoom: 8.5,
     paint: {
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, ["case", ["get", "transfer"], 2.6, 1.4], 12, ["case", ["get", "transfer"], 5, 3], 15, ["case", ["get", "transfer"], 8, 5.5]],
-      "circle-color": ["case", ["get", "transfer"], "#f4f7fa", "#0b0f14"],
-      "circle-stroke-color": ["case", ["get", "transfer"], "#0b0f14", ["get", "color"]],
       "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 9, 0.8, 14, 2],
       "circle-pitch-alignment": "map",
     },
@@ -217,7 +272,6 @@ function addLayers() {
     id: "train-glow", type: "circle", source: "trains", maxzoom: ZOOM_3D + 1,
     paint: {
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 5, 12, 13],
-      "circle-color": ["get", "color"],
       "circle-blur": 1,
       "circle-opacity": ["interpolate", ["linear"], ["zoom"], 8, 0.35, ZOOM_3D, 0.3, ZOOM_3D + 1, 0],
       "circle-pitch-alignment": "map",
@@ -227,8 +281,6 @@ function addLayers() {
     id: "train-dot", type: "circle", source: "trains",
     paint: {
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 2.2, 11, 3.6, ZOOM_3D, 5.5],
-      "circle-color": ["get", "color"],
-      "circle-stroke-color": "#f4f7fa",
       "circle-stroke-width": ["case", ["get", "express"], 2, 0.8],
       "circle-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
       "circle-stroke-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
@@ -238,7 +290,6 @@ function addLayers() {
   map.addLayer({
     id: "train-3d", type: "fill-extrusion", source: "trains3d", minzoom: ZOOM_3D - 0.4,
     paint: {
-      "fill-extrusion-color": ["get", "color"],
       "fill-extrusion-height": ["get", "h"],
       "fill-extrusion-base": 0,
       "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.4, 0, ZOOM_3D + 0.4, 0.95],
@@ -251,7 +302,7 @@ function addLayers() {
     paint: {
       "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 10, 15, 26],
       "circle-color": "rgba(0,0,0,0)",
-      "circle-stroke-color": "#5eead4",
+      "circle-stroke-color": "#14b8a6",
       "circle-stroke-width": 2,
       "circle-pitch-alignment": "map",
     },
@@ -267,10 +318,40 @@ function addLayers() {
       "text-justify": "auto",
       "text-padding": 3,
     },
-    paint: { "text-color": "#d5dde6", "text-halo-color": "#0b0f14", "text-halo-width": 1.4 },
+    paint: { "text-halo-width": 1.4 },
   });
   map.addLayer({ id: "label-transfer", ...label(10.4, ["get", "transfer"], ["interpolate", ["linear"], ["zoom"], 10, 10.5, 14, 13.5, 17, 16]) });
   map.addLayer({ id: "label-station", ...label(12.3, ["!", ["get", "transfer"]], ["interpolate", ["linear"], ["zoom"], 12, 10, 14, 12.5, 17, 15]) });
+}
+
+// ---------- theme ----------
+
+/** Recolors map and panels for the chosen theme; in "auto" it's re-run every minute to follow the sun. */
+function applyTheme() {
+  const next = paletteFor(theme);
+  palette = next.palette;
+  ui = next.ui;
+  document.documentElement.dataset.theme = ui;
+  document.querySelector('meta[name="theme-color"]').content = palette.bg;
+  for (const l of lines.values()) l.display = lineColor(l.color, ui);
+  for (const b of document.querySelectorAll("[data-theme-choice]")) b.setAttribute("aria-checked", String(b.dataset.themeChoice === theme));
+  if (!ready) return;
+  applyPalette(map, palette);
+  const key = ["get", ui === "light" ? "cl" : "cd"];
+  map.setPaintProperty("line-casing", "line-color", palette.bg);
+  map.setPaintProperty("station-dot", "circle-color", ["case", ["get", "transfer"], "#f4f7fa", palette.bg]);
+  map.setPaintProperty("station-dot", "circle-stroke-color", ["case", ["get", "transfer"], ui === "light" ? "#2b333d" : "#0b0f14", key]);
+  for (const id of ["label-transfer", "label-station"]) {
+    map.setPaintProperty(id, "text-color", palette.text);
+    map.setPaintProperty(id, "text-halo-color", palette.bg);
+  }
+  applyFocus();
+}
+
+function setTheme(choice) {
+  theme = choice;
+  savePref(choice);
+  applyTheme();
 }
 
 // ---------- focus & mode ----------
@@ -279,21 +360,23 @@ function applyFocus() {
   if (!ready) return;
   const on = (expr, a, b) => (focus ? ["case", expr, a, b] : a);
   const isLine = ["==", ["get", "line"], focus ?? ""];
+  const hasLine = ["in", `,${focus},`, ["get", "lines"]];
+  const key = ["get", ui === "light" ? "cl" : "cd"];
   const dimLines = mode === "gaps";
+  map.setPaintProperty("line-core", "line-color", key);
+  map.setPaintProperty("line-glow", "line-color", key);
   map.setPaintProperty("line-core", "line-opacity", on(isLine, dimLines ? 0.22 : 1, 0.12));
-  map.setPaintProperty("line-glow", "line-opacity", on(isLine, dimLines ? 0.05 : 0.2, 0.03));
+  map.setPaintProperty("line-glow", "line-opacity", on(isLine, dimLines ? 0.05 : palette.glow, 0.03));
   map.setPaintProperty("line-casing", "line-opacity", on(isLine, 0.85, 0.3));
-  map.setPaintProperty("station-dot", "circle-opacity", on(["in", `,${focus},`, ["get", "lines"]], 1, 0.25));
-  map.setPaintProperty("station-dot", "circle-stroke-opacity", on(["in", `,${focus},`, ["get", "lines"]], 1, 0.25));
-  map.setPaintProperty("train-dot", "circle-color", on(isLine, ["get", "color"], DIM));
+  map.setPaintProperty("station-dot", "circle-opacity", on(hasLine, 1, 0.25));
+  map.setPaintProperty("station-dot", "circle-stroke-opacity", on(hasLine, 1, 0.25));
+  map.setPaintProperty("train-dot", "circle-color", on(isLine, ["get", "color"], palette.dim));
   map.setPaintProperty("train-dot", "circle-stroke-color", on(isLine, "#f4f7fa", "rgba(244,247,250,0.1)"));
   map.setPaintProperty("train-glow", "circle-color", on(isLine, ["get", "color"], "rgba(0,0,0,0)"));
-  map.setPaintProperty("train-3d", "fill-extrusion-color", on(isLine, ["get", "color"], DIM));
+  map.setPaintProperty("train-3d", "fill-extrusion-color", on(isLine, ["get", "color"], palette.dim));
   map.setLayoutProperty("gaps", "visibility", mode === "gaps" ? "visible" : "none");
   map.setPaintProperty("gaps", "line-opacity", on(isLine, 1, 0.08));
-  for (const id of ["label-transfer", "label-station"]) {
-    map.setPaintProperty(id, "text-opacity", on(["in", `,${focus},`, ["get", "lines"]], 1, 0.3));
-  }
+  for (const id of ["label-transfer", "label-station"]) map.setPaintProperty(id, "text-opacity", on(hasLine, 1, 0.3));
 }
 
 function setFocus(id, fly = true) {
@@ -316,7 +399,7 @@ function fitTo(coords, maxZoom = 13.5) {
 
 function setMode(m) {
   mode = m;
-  for (const b of document.querySelectorAll(".segmented button")) b.setAttribute("aria-checked", String(b.dataset.mode === m));
+  for (const b of document.querySelectorAll("[data-mode]")) b.setAttribute("aria-checked", String(b.dataset.mode === m));
   $("legend").hidden = m !== "gaps";
   computeGaps();
   applyFocus();
@@ -324,20 +407,20 @@ function setMode(m) {
 
 // ---------- snapshots ----------
 
+/** Meters from `d` to station index `idx`, going in direction `dir` (wrapping on loops). */
+function forward(c, d, idx, dir) {
+  let m = (c.stationD[idx] - d) * dir;
+  if (c.loop) m = ((m % c.total) + c.total) % c.total;
+  return m;
+}
+
 function applySnapshot(snap) {
   const now = performance.now();
   const dtSnap = snapshot ? (now - receivedAt) / 1000 : 0;
   snapshot = snap;
   receivedAt = now;
-
-  const badge = $("source");
-  if (snap.paused) {
-    badge.textContent = "운행 종료";
-    badge.className = "badge paused";
-  } else {
-    badge.textContent = snap.source === "live" ? "LIVE" : "SIMULATION";
-    badge.className = `badge ${snap.source}`;
-  }
+  stale = false;
+  updateBadge();
 
   const seen = new Set();
   for (const s of snap.trains) {
@@ -348,7 +431,7 @@ function applySnapshot(snap) {
     const baseD = distOfPos(c, s.pos);
     let t = trains.get(s.id);
     if (!t || t.line !== s.line || t.chain !== s.chain) {
-      t = { id: s.id, line: s.line, chain: s.chain, d: baseD, v: 0 };
+      t = { id: s.id, line: s.line, chain: s.chain, d: baseD, v: 0, moving: s.moving };
       trains.set(s.id, t);
     } else if (snap.source === "mock" && dtSnap > 0) {
       // Simulation updates every second: carry the measured speed between frames.
@@ -356,25 +439,72 @@ function applySnapshot(snap) {
       if (c.loop) moved = ((moved % c.total) + c.total * 1.5) % c.total - c.total / 2;
       t.v = s.moving && Math.abs(moved) < 2000 ? moved / dtSnap : 0;
     }
+    if (s.id === selected && !t.moving && s.moving) t.departed = true;
     t.baseD = baseD;
     t.basePos = s.pos;
     t.dir = s.dir;
     t.moving = s.moving;
     t.dest = s.dest;
     t.express = !!s.express;
-    if (snap.source === "live") t.v = s.moving ? s.dir * RUN_SPEED : 0;
+    t.eta = undefined;
+    if (snap.source === "live") {
+      t.v = s.moving ? s.dir * RUN_SPEED : 0;
+      // Arrival countdown → the speed that gets the train there on time, if it's plausible.
+      if (s.eta && s.moving) {
+        const meters = forward(c, baseD, s.eta.station, s.dir);
+        const secs = (s.eta.at - snap.ts) / 1000;
+        if (secs > 5 && meters / secs > 2 && meters / secs < 30) {
+          t.eta = s.eta;
+          t.etaD = meters;
+        }
+      }
+    }
   }
   for (const id of trains.keys()) if (!seen.has(id)) trains.delete(id);
   if (selected && !trains.has(selected)) selectTrain(null);
 
   // Live arrivals were collected over the whole polling interval; spread them back out.
-  for (const a of snap.arrivals) {
-    const delay = snap.source === "live" ? Math.random() * snap.intervalMs * 0.85 : Math.random() * snap.intervalMs;
-    setTimeout(() => onArrival(a), delay);
-  }
+  for (const a of snap.arrivals) setTimeout(() => onArrival(a), Math.random() * snap.intervalMs * (snap.source === "live" ? 0.85 : 1));
 
   updateLineList();
   computeGaps();
+}
+
+function updateBadge() {
+  const badge = $("source");
+  if (!snapshot) return;
+  if (snapshot.paused) {
+    badge.textContent = "운행 종료";
+    badge.className = "badge paused";
+  } else if (stale) {
+    badge.textContent = "지연";
+    badge.className = "badge stale";
+  } else {
+    badge.textContent = snapshot.source === "live" ? "LIVE" : "SIMULATION";
+    badge.className = `badge ${snapshot.source}`;
+  }
+}
+
+/** How old the data is; past two polling intervals the badge says so and trains stop extrapolating. */
+function updateAge() {
+  const el = $("age");
+  if (!snapshot || snapshot.paused) {
+    el.textContent = "";
+    return;
+  }
+  const age = Math.max(0, Date.now() - snapshot.ts);
+  const limit = snapshot.source === "live" ? snapshot.intervalMs * 2 + 20_000 : 10_000;
+  const wasStale = stale;
+  stale = age > limit;
+  if (stale !== wasStale) updateBadge();
+  el.classList.toggle("stale", stale);
+  if (snapshot.source !== "live") {
+    el.textContent = stale ? "시뮬레이션 응답이 없어요" : "";
+    return;
+  }
+  const s = Math.round(age / 1000);
+  const ago = s < 60 ? `${s}초 전` : `${Math.floor(s / 60)}분 전`;
+  el.textContent = stale ? `${ago} 갱신 · 실시간 데이터가 늦어지고 있어요` : `${ago} 갱신`;
 }
 
 // ---------- animation ----------
@@ -392,6 +522,7 @@ function roomAhead(c, t) {
 }
 
 let last = performance.now();
+let lastTrains = 0;
 let lastGaps = 0;
 function frame(now) {
   requestAnimationFrame(frame);
@@ -404,32 +535,61 @@ function frame(now) {
   const k = 1 - Math.exp(-dt * 4);
   for (const t of trains.values()) {
     const c = chainOf(t);
+    let run = 0;
+    if (!stale) {
+      if (t.eta) run = t.etaD * Math.min(1, (Date.now() - snapshot.ts) / (t.eta.at - snapshot.ts));
+      else run = Math.abs(t.v) * Math.min(elapsed, live ? Infinity : (snapshot.intervalMs / 1000) * 1.5);
+    }
     // Never run past the next station: the train will stop there (or the next update says otherwise).
-    const run = Math.abs(t.v) * Math.min(elapsed, live ? Infinity : (snapshot.intervalMs / 1000) * 1.5);
     const ahead = t.dir * Math.min(run, Math.max(0, roomAhead(c, t) - (live ? 15 : 0)));
     const target = t.baseD + ahead;
     let diff = target - t.d;
     if (c.loop) diff = ((diff % c.total) + c.total * 1.5) % c.total - c.total / 2;
+    const prev = t.d;
     t.d = Math.abs(diff) > 4000 ? target : t.d + diff * (live ? k : Math.min(1, k * 3));
     t.d = wrapDist(c, t.d);
-    const p = pointAt(c, t.d);
-    t.ll = p.lngLat;
+    if (t.id === selected && dt > 0) t.speed = (t.speed ?? 0) * 0.9 + Math.min(60, Math.abs(t.d - prev) / dt) * 0.1;
+    t.ll = pointAt(c, t.d).lngLat;
   }
 
-  renderTrains();
+  if (now - lastTrains >= TRAIN_FRAME_MS) {
+    lastTrains = now;
+    renderTrains();
+  }
   renderRipples(now);
   if (now - lastGaps > 300) {
     lastGaps = now;
     computeGaps();
   }
-  // Chase-cam, but let camera animations (the zoom-in, 2D/3D switch) finish first.
-  if (following && selected && now > cameraBusyUntil) {
+  if (following && selected) {
     const t = trains.get(selected);
     if (t) {
-      const c = map.getCenter();
-      map.jumpTo({ center: [c.lng + (t.ll[0] - c.lng) * 0.12, c.lat + (t.ll[1] - c.lat) * 0.12] });
+      // Chase-cam, but let camera animations (the zoom-in, 2D/3D switch) finish first.
+      if (now > cameraBusyUntil) {
+        const c = map.getCenter();
+        map.jumpTo({ center: [c.lng + (t.ll[0] - c.lng) * 0.12, c.lat + (t.ll[1] - c.lat) * 0.12] });
+      }
+      followSound(t.speed ?? 0, soundEvent(t));
     }
   }
+}
+
+/** "arrive" once as the followed train closes in on a station, "depart" when it pulls out. */
+function soundEvent(t) {
+  if (t.departed) {
+    t.departed = false;
+    return "depart";
+  }
+  const c = chainOf(t);
+  const pos = posOfDist(c, t.d);
+  const next = t.dir > 0 ? Math.floor(pos + 0.02) + 1 : Math.ceil(pos - 0.02) - 1;
+  const idx = c.loop ? ((next % c.n) + c.n) % c.n : next;
+  if (idx < 0 || idx >= c.n || !t.moving) return null;
+  if (forward(c, t.d, idx, t.dir) < 160 && t.arrivedAt !== idx) {
+    t.arrivedAt = idx;
+    return "arrive";
+  }
+  return null;
 }
 
 function renderTrains() {
@@ -451,9 +611,14 @@ function renderTrains() {
     const c = chainOf(t);
     let d1 = t.d - TRAIN.length / 2;
     let d2 = t.d + TRAIN.length / 2;
-    if (c.loop && d1 < 0) { d1 += c.total; d2 += c.total; }
-    if (!c.loop) { d1 = Math.max(0, d1); d2 = Math.min(c.total, d2); }
-    const ring = ribbon(slice(c, d1, d2), TRAIN.width);
+    if (!c.loop) {
+      d1 = Math.max(0, d1);
+      d2 = Math.min(c.total, d2);
+    }
+    // Evenly spaced samples rather than raw track vertices, so a kink in the track can't twist the body.
+    const centerline = [];
+    for (let i = 0; i <= 6; i++) centerline.push(pointAt(c, d1 + ((d2 - d1) * i) / 6).lngLat);
+    const ring = ribbon(centerline, TRAIN.width);
     if (!ring) continue;
     bodies.push({
       type: "Feature",
@@ -496,8 +661,7 @@ function computeGaps() {
       let d2 = b.d;
       if (c.loop && i === list.length - 1) d2 += c.total; // last train back around to the first
       if (d2 - a.d < 30) continue;
-      const span = posAlong(c, d2) - posAlong(c, a.d);
-      gaps.push({ line: lineId, chain: c, dir: +dir, from: a.d, to: d2, span });
+      gaps.push({ line: lineId, chain: c, dir: +dir, from: a.d, to: d2, span: posAlong(c, d2) - posAlong(c, a.d) });
     }
   }
   if (mode === "gaps") {
@@ -535,7 +699,7 @@ function updateStats() {
   const c = maxGap.chain;
   const from = stationName(c, posOfDist(c, maxGap.from));
   const to = stationName(c, posOfDist(c, maxGap.to));
-  btn.innerHTML = `${badgeHtml(line)} ${from} ↔ ${to} <span class="muted">${maxGap.span.toFixed(1)}역</span>`;
+  btn.innerHTML = `${badgeHtml(line)} ${esc(from)} ↔ ${esc(to)} <span class="muted">${maxGap.span.toFixed(1)}역</span>`;
   btn.disabled = false;
 }
 
@@ -550,9 +714,6 @@ function onArrival(a) {
   if (!ll || !map.getBounds().contains(ll)) return;
   if (focus && focus !== a.line) return;
   if (ripples.length < 80) ripples.push({ ll, color: line.display, t0: performance.now() });
-  const p = map.project(ll);
-  const canvas = map.getCanvas();
-  chime(p.x / canvas.clientWidth, p.y / canvas.clientHeight, a.dir > 0);
 }
 
 let ripplesShown = false;
@@ -606,14 +767,16 @@ function onHover(e) {
   map.getCanvas().style.cursor = t || s ? "pointer" : "";
   if (t) {
     const { line, no, where, dest, express } = trainSummary(t);
-    tip.setLngLat(t.ll).setHTML(`${badgeHtml(line)} <strong>${line.name}</strong> <span class="muted">${no}</span><br>${[dest, express].filter(Boolean).join(" · ")}<br><span class="muted">${where}</span>`).addTo(map);
+    tip.setLngLat(t.ll).setHTML(`${badgeHtml(line)} <strong>${esc(line.name)}</strong> <span class="muted">${esc(no)}</span><br>${esc([dest, express].filter(Boolean).join(" · "))}<br><span class="muted">${esc(where)}</span>`).addTo(map);
   } else if (s) {
     const ids = s.properties.lines.split(",").filter(Boolean);
-    tip.setLngLat(s.geometry.coordinates).setHTML(`<strong>${s.properties.name}</strong><div class="badges">${ids.map((id) => badgeHtml(lines.get(id))).join("")}</div>`).addTo(map);
+    tip.setLngLat(s.geometry.coordinates).setHTML(`<strong>${esc(s.properties.name)}</strong><div class="badges">${ids.map((id) => badgeHtml(lines.get(id))).join("")}</div>`).addTo(map);
   } else tip.remove();
 }
 
 function onClick(e) {
+  // On touch screens the hover tooltip would otherwise stay up after a tap.
+  if (coarse) tip.remove();
   const t = trainAt(e.point);
   if (t) {
     selectTrain(t.id);
@@ -621,15 +784,18 @@ function onClick(e) {
   }
   const s = stationAt(e.point);
   if (s) {
+    openBoard(s.properties.name, s.properties.lines.split(",").filter(Boolean));
     ease({ center: s.geometry.coordinates, zoom: Math.max(map.getZoom(), 14.5), duration: 1200 });
     return;
   }
   selectTrain(null);
+  closeBoard();
 }
 
 function selectTrain(id) {
   selected = id;
   if (!id) setFollow(false);
+  else closeBoard();
   if (ready) map.setFilter("train-selected", ["==", ["get", "id"], id ?? ""]);
   $("train-card").hidden = !id;
   updateTrainCard();
@@ -654,8 +820,75 @@ function setFollow(on) {
   $("tc-follow").textContent = following ? "따라가는 중" : "따라가기";
   if (following) {
     const t = trains.get(selected);
+    t.arrivedAt = undefined;
     ease({ center: t.ll, zoom: Math.max(map.getZoom(), 14.6), pitch: tilted ? 62 : 0, duration: 1400 });
+  } else stopAll();
+}
+
+// ---------- station board ----------
+
+function openBoard(name, lineIds) {
+  selectTrain(null);
+  board = { name, lines: lineIds, line: focus && lineIds.includes(focus) ? focus : lineIds[0], data: undefined };
+  $("sc-title").textContent = name;
+  $("sc-lines").innerHTML = lineIds
+    .map((id) => `<button type="button" role="tab" data-line="${esc(id)}" aria-selected="${id === board.line}" title="${esc(lines.get(id).name)}">${badgeHtml(lines.get(id))}</button>`)
+    .join("");
+  $("station-card").hidden = false;
+  fetchBoard();
+}
+
+function closeBoard() {
+  board = null;
+  $("station-card").hidden = true;
+}
+
+async function fetchBoard() {
+  const b = board;
+  if (!b) return;
+  renderBoard();
+  let data = null;
+  try {
+    const res = await fetch(`/api/board?line=${encodeURIComponent(b.line)}&station=${encodeURIComponent(b.name)}`);
+    if (res.ok) data = await res.json();
+  } catch {}
+  if (board !== b) return;
+  b.data = data;
+  renderBoard();
+}
+
+function when(item) {
+  if (item.at) {
+    const s = Math.round((item.at - Date.now()) / 1000);
+    if (s > -30) {
+      if (s <= 20) return { text: "곧 도착", far: false };
+      if (s < 60) return { text: `${s}초`, far: false };
+      return { text: `${Math.floor(s / 60)}분 ${String(s % 60).padStart(2, "0")}초`, far: false };
+    }
   }
+  return { text: item.msg.replace(/\s*\(.*\)$/, ""), far: true };
+}
+
+function renderBoard() {
+  if (!board) return;
+  const el = $("sc-board");
+  if (board.data === undefined) {
+    el.innerHTML = `<p class="empty">불러오는 중…</p>`;
+    return;
+  }
+  const covered = snapshot?.source !== "live" || snapshot.lines.includes(board.line);
+  if (!board.data?.groups?.length) {
+    el.innerHTML = `<p class="empty">${covered ? "다가오는 열차 정보가 없어요" : "이 노선은 실시간 정보를 제공하지 않아요"}</p>`;
+    return;
+  }
+  el.innerHTML = board.data.groups
+    .map((g) => `<section><h3>${esc(g.heading)}</h3><ol>${g.items
+      .map((i) => {
+        const w = when(i);
+        return `<li><button type="button" data-train="${esc(i.train)}"><span>${esc(i.dest ? `${i.dest}행` : "열차")}${i.express ? '<span class="exp">급행</span>' : ""}</span><span class="when${w.far ? " far" : ""}">${esc(w.text)}</span></button></li>`;
+      })
+      .join("")}</ol></section>`)
+    .join("");
 }
 
 // ---------- panel ----------
@@ -665,7 +898,7 @@ function buildLineList() {
   ul.replaceChildren();
   for (const l of lines.values()) {
     const li = document.createElement("li");
-    li.innerHTML = `<button type="button" data-line="${l.id}" aria-pressed="false">${badgeHtml(l)}<span>${l.name}</span><span class="count">–</span></button>`;
+    li.innerHTML = `<button type="button" data-line="${esc(l.id)}" aria-pressed="false">${badgeHtml(l)}<span>${esc(l.name)}</span><span class="count">–</span></button>`;
     li.firstChild.addEventListener("click", () => setFocus(l.id));
     ul.appendChild(li);
   }
@@ -690,15 +923,23 @@ function setTilt(on) {
   ease({ pitch: on ? HOME.pitch : 0, bearing: on ? HOME.bearing : 0, duration: 1000 });
 }
 
+let lastThemeTick = 0;
 function tickClock() {
   const d = new Date();
   $("clock").textContent = kst.format(d);
   $("date").textContent = kstDate.format(d);
+  updateAge();
   updateTrainCard();
+  if (board?.data) renderBoard();
+  if (theme === "auto" && Date.now() - lastThemeTick > 60_000) {
+    lastThemeTick = Date.now();
+    applyTheme();
+  }
 }
 
 function wireUi() {
-  for (const b of document.querySelectorAll(".segmented button")) b.addEventListener("click", () => setMode(b.dataset.mode));
+  for (const b of document.querySelectorAll("[data-mode]")) b.addEventListener("click", () => setMode(b.dataset.mode));
+  for (const b of document.querySelectorAll("[data-theme-choice]")) b.addEventListener("click", () => setTheme(b.dataset.themeChoice));
   $("clear-focus").addEventListener("click", () => setFocus(focus));
   $("stat-max").addEventListener("click", () => maxGap && fitTo(slice(maxGap.chain, maxGap.from, maxGap.to), 14));
   $("home").addEventListener("click", () => {
@@ -709,18 +950,37 @@ function wireUi() {
   $("sound").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     const on = btn.getAttribute("aria-pressed") !== "true";
-    await setSound(on);
     btn.setAttribute("aria-pressed", String(on));
+    await setSound(on);
   });
   $("tc-close").addEventListener("click", () => selectTrain(null));
   $("tc-follow").addEventListener("click", () => setFollow(!following));
+  $("sc-close").addEventListener("click", closeBoard);
+  $("sc-lines").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-line]");
+    if (!b || !board) return;
+    board.line = b.dataset.line;
+    board.data = undefined;
+    for (const x of $("sc-lines").children) x.setAttribute("aria-selected", String(x.dataset.line === board.line));
+    fetchBoard();
+  });
+  $("sc-board").addEventListener("click", (e) => {
+    const id = e.target.closest("button[data-train]")?.dataset.train;
+    const t = id && trains.get(id);
+    if (!t) return;
+    selectTrain(id);
+    ease({ center: t.ll, zoom: Math.max(map.getZoom(), 14), duration: 1200 });
+  });
+  // Boards change with every poll; refetch while one is open.
+  setInterval(fetchBoard, 20_000);
   $("sheet-handle").addEventListener("click", () => {
     const p = $("panel");
     p.dataset.open = String(p.dataset.open !== "true");
   });
   addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (selected) selectTrain(null);
+    if (board) closeBoard();
+    else if (selected) selectTrain(null);
     else if (focus) setFocus(focus, false);
   });
 }
@@ -737,7 +997,9 @@ function connect() {
 }
 
 try {
+  applyTheme();
   await loadNetwork();
+  for (const l of lines.values()) l.display = lineColor(l.color, ui);
   buildLineList();
   wireUi();
   createMap();
@@ -747,5 +1009,5 @@ try {
   requestAnimationFrame(frame);
 } catch (err) {
   console.error(err);
-  $("loading").innerHTML = `지도를 불러오지 못했습니다: ${err.message}`;
+  $("loading").innerHTML = `지도를 불러오지 못했습니다: ${esc(err.message)}`;
 }

@@ -1,6 +1,6 @@
 import { normalizeStation, stationOnLine } from "../lines.js";
 import { stationIndex } from "../network.js";
-import type { Arrival, Direction, Feed, Network, NetworkLine, Snapshot, Train } from "../types.js";
+import type { Arrival, Board, BoardItem, Direction, Feed, Network, NetworkLine, Snapshot, Train } from "../types.js";
 
 /** One row of the 서울시 실시간 도착정보 (realtimeStationArrival/ALL) API. */
 interface ArrivalRow {
@@ -13,8 +13,12 @@ interface ArrivalRow {
   bstatnNm: string; // 종착역
   btrainSttus: string; // 일반 / 급행 / ITX / 특급
   arvlCd: string; // 0 진입, 1 도착, 2 출발, 3 전역출발, 4 전역진입, 5 전역도착, 99 운행중
+  arvlMsg2: string; // "3분 20초 후 (서초)", "[5]번째 전역 (신도림)", "강남 진입"
   arvlMsg3: string; // station the train is currently at/near
   recptnDt: string; // "2026-10-12 16:37:57" KST
+  trainLineNm: string; // "개화행 - 염창방면"
+  updnLine: string;
+  ordkey: string; // the API's own ordering of arrivals at a station
 }
 
 // How precisely each code pins the train down; the most precise of a train's latest rows wins.
@@ -29,6 +33,13 @@ interface Placed {
 }
 
 const kstTime = (s: string) => Date.parse(`${s.replace(" ", "T")}+09:00`);
+
+/** Seconds until arrival, when the message is an explicit countdown ("3분 20초 후", "40초 후"). */
+function countdown(msg: string | undefined): number | undefined {
+  const m = msg?.match(/(?:(\d+)분\s*)?(?:(\d+)초\s*)?후/);
+  if (!m || (m[1] === undefined && m[2] === undefined)) return;
+  return Number(m[1] ?? 0) * 60 + Number(m[2] ?? 0);
+}
 
 /**
  * Live positions for every line from a single realtimeStationArrival/ALL call.
@@ -45,6 +56,9 @@ export class SeoulFeed implements Feed {
   private lastStop = new Map<string, string>();
   private bootstrapped = false;
   private unknown = new Set<string>();
+  /** Latest fresh rows per "line|station", for station boards. */
+  private rowsAt = new Map<string, ArrivalRow[]>();
+  private rowsTs = 0;
 
   constructor(
     network: Network,
@@ -77,12 +91,17 @@ export class SeoulFeed implements Feed {
     const now = Date.now();
     const time = (r: ArrivalRow) => Math.min(kstTime(r.recptnDt) || 0, now);
     const best = new Map<string, ArrivalRow>();
+    const byTrain = new Map<string, ArrivalRow[]>();
+    const rowsAt = new Map<string, ArrivalRow[]>();
     for (const r of rows) {
       const line = this.lineByApi.get(r.subwayId);
       if (!line || !r.btrainNo) continue;
       const t = time(r);
       if (now - t > STALE_MS) continue;
       const id = `${line.id}:${r.btrainNo}`;
+      byTrain.set(id, [...(byTrain.get(id) ?? []), r]);
+      const at = `${line.id}|${stationOnLine(line.id, r.statnNm)}`;
+      rowsAt.set(at, [...(rowsAt.get(at) ?? []), r]);
       const cur = best.get(id);
       const better = !cur || t > time(cur) || (t === time(cur) && (RANK[r.arvlCd] ?? 9) < (RANK[cur.arvlCd] ?? 9));
       if (better) best.set(id, r);
@@ -97,10 +116,14 @@ export class SeoulFeed implements Feed {
       if (line) liveLines.add(line.id);
     }
 
+    this.rowsAt = rowsAt;
+    this.rowsTs = now;
+
     for (const [id, r] of best) {
       const line = this.lineByApi.get(r.subwayId)!;
       const placed = this.place(line, id, r);
       if (!placed) continue;
+      placed.train.eta = this.eta(line, placed.train, byTrain.get(id)!, time, now);
       trains.push(placed.train);
       seen.add(id);
 
@@ -185,6 +208,52 @@ export class SeoulFeed implements Feed {
 
     const express = /급행|특급|ITX/.test(r.btrainSttus ?? "");
     return { train: { id, line: line.id, chain: opt.chain, pos: Math.round(pos * 1000) / 1000, dir, moving, dest, express }, at };
+  }
+
+  /**
+   * When the train is due at the nearest station ahead that has a countdown ("3분 20초 후").
+   * Only some lines (Seoul Metro 2–7, 9호선) publish countdowns.
+   */
+  private eta(line: NetworkLine, train: Train, rows: ArrivalRow[], time: (r: ArrivalRow) => number, now: number): Train["eta"] {
+    const index = this.index.get(line.id)!;
+    let best: Train["eta"];
+    let bestAhead = Infinity;
+    for (const r of rows) {
+      const sec = countdown(r.arvlMsg2);
+      if (sec === undefined) continue;
+      const idx = index.get(stationOnLine(line.id, r.statnNm))?.find((o) => o.chain === train.chain)?.idx;
+      if (idx === undefined) continue;
+      const n = line.chains[train.chain].stations.length;
+      let ahead = (idx - train.pos) * train.dir;
+      if (line.chains[train.chain].loop) ahead = ((ahead % n) + n) % n;
+      const at = time(r) + sec * 1000;
+      if (ahead <= 0.02 || at < now || ahead >= bestAhead) continue;
+      bestAhead = ahead;
+      best = { station: idx, at };
+    }
+    return best;
+  }
+
+  /** Next trains at a station, grouped by direction, from the latest poll. No extra API call. */
+  board(lineId: string, station: string): Board | undefined {
+    const rows = this.rowsAt.get(`${lineId}|${station}`);
+    if (!rows) return;
+    const groups = new Map<string, BoardItem[]>();
+    for (const r of [...rows].sort((a, b) => a.ordkey.localeCompare(b.ordkey))) {
+      const heading = r.trainLineNm?.split(" - ")[1]?.replace(/\s*\(.*\)$/, "").trim() || r.updnLine;
+      const sec = countdown(r.arvlMsg2);
+      const item: BoardItem = {
+        train: `${lineId}:${r.btrainNo}`,
+        dest: r.bstatnNm ? stationOnLine(lineId, r.bstatnNm) : undefined,
+        express: /급행|특급|ITX/.test(r.btrainSttus ?? ""),
+        msg: (r.arvlMsg2 ?? "").replace(/\[(\d+)\]/, "$1").trim(),
+        at: sec === undefined ? undefined : Math.min(kstTime(r.recptnDt) || 0, this.rowsTs) + sec * 1000,
+      };
+      const list = groups.get(heading) ?? [];
+      if (list.length < 3 && !list.some((x) => x.train === item.train)) list.push(item);
+      groups.set(heading, list);
+    }
+    return { line: lineId, station, ts: this.rowsTs, groups: [...groups].map(([heading, items]) => ({ heading, items })) };
   }
 
   /** Which way along the chain gets closer to `dest`, measured over the whole line's station graph. */

@@ -42,6 +42,26 @@ export interface Train {
   moving: boolean;
   dest?: string;
   express?: boolean;
+  /** When the train is due at chain station `station` (epoch ms), if the feed says so. */
+  eta?: { station: number; at: number };
+}
+
+export interface BoardItem {
+  train: string;
+  dest?: string;
+  express?: boolean;
+  /** The feed's own wording, e.g. "2번째 전역 (신도림)", "전역 도착" */
+  msg: string;
+  /** Arrival time (epoch ms) when known; the client turns it into a live countdown. */
+  at?: number;
+}
+
+/** Upcoming trains at one station on one line, grouped by direction ("○○방면"). */
+export interface Board {
+  line: string;
+  station: string;
+  ts: number;
+  groups: { heading: string; items: BoardItem[] }[];
 }
 
 export interface Arrival {
@@ -68,5 +88,7 @@ export interface Feed {
   readonly source: Snapshot["source"];
   /** Returns the next snapshot; called on every tick. */
   next(): Promise<Snapshot>;
+  /** Upcoming trains at a station, from data the feed already has. */
+  board(line: string, station: string): Board | undefined;
   intervalMs: number;
 }

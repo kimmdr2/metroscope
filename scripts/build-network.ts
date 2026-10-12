@@ -105,6 +105,35 @@ function simplify(points: LngLat[], tolerance: number): LngLat[] {
   return points.filter((_, i) => keep[i]);
 }
 
+/** True where the track turns back by more than 100° at p[i]: real track never does that. */
+function isSpike(p: LngLat[], i: number) {
+  const c = Math.cos(rad(p[i][1]));
+  const ax = (p[i][0] - p[i - 1][0]) * c, ay = p[i][1] - p[i - 1][1];
+  const bx = (p[i + 1][0] - p[i][0]) * c, by = p[i + 1][1] - p[i][1];
+  const cos = (ax * bx + ay * by) / (Math.hypot(ax, ay) * Math.hypot(bx, by) || 1);
+  return cos < Math.cos(rad(100));
+}
+
+function sharpTurns(p: LngLat[]) {
+  let n = 0;
+  for (let i = 1; i < p.length - 1; i++) if (isSpike(p, i)) n++;
+  return n;
+}
+
+/**
+ * Removes points where the path runs into a dead end and comes back (terminal stubs like
+ * 산본·상일동·청량리 platforms), in place. Stations on a removed point move to its neighbor.
+ */
+function despike(p: LngLat[], at: number[]) {
+  for (let guard = 0; guard < 50; guard++) {
+    let i = 1;
+    while (i < p.length - 1 && !isSpike(p, i)) i++;
+    if (i >= p.length - 1) return;
+    p.splice(i, 1);
+    for (let k = 0; k < at.length; k++) if (at[k] >= i && at[k] > 0) at[k]--;
+  }
+}
+
 class MinHeap {
   private items: [number, number][] = [];
   get size() { return this.items.length; }
@@ -224,6 +253,11 @@ function buildLine(def: LineDef): NetworkLine {
   };
   const stations: Record<string, LngLat> = {};
   for (const name of stopNodes.keys()) stations[name] = centroid(name);
+  for (const [name, at] of Object.entries(def.patch?.stations ?? {})) {
+    stations[name] = at;
+    if (!stopNodes.has(name)) stopNodes.set(name, new Set());
+  }
+  for (const [a, b] of def.patch?.links ?? []) link(a, b);
 
   // Drop edges that skip stations (a stray express pattern): there's a short detour through
   // other stations that's about as long as the direct hop.
@@ -263,7 +297,8 @@ function buildLine(def: LineDef): NetworkLine {
     // Stop nodes not on the track ways: snap to the nearest track node.
     const c = stations[name];
     let best: number | undefined;
-    let bestD = 120;
+    // Patched-in stations have no stop nodes; their platforms can be a block away from the track.
+    let bestD = def.patch?.stations?.[name] ? 300 : 120;
     for (const [id, p] of g.coord) {
       const d = dist(c, p);
       if (d < bestD) { bestD = d; best = id; }
@@ -271,16 +306,22 @@ function buildLine(def: LineDef): NetworkLine {
     return best === undefined ? [] : [best];
   };
 
-  function trackPath(a: string, b: string): LngLat[] {
-    const found = searchTrack(lineTracks, a, b) ?? searchTrack(allTracks, a, b);
+  /**
+   * Track between two stations. `from` is the node the previous leg ended on: starting there keeps
+   * the line continuous instead of hopping to the other track's platform, which drew a spike
+   * doubling back up to ~100m (and twisted any train drawn across it).
+   */
+  function trackPath(a: string, b: string, from?: number): { path: LngLat[]; end?: number } {
+    const found =
+      searchTrack(lineTracks, a, b, from) ?? searchTrack(lineTracks, a, b) ?? searchTrack(allTracks, a, b, from) ?? searchTrack(allTracks, a, b);
     if (found) return found;
     warn(`${def.name}: no track path ${a}→${b}, using straight line`);
-    return [stations[a], stations[b]];
+    return { path: [stations[a], stations[b]] };
   }
 
-  function searchTrack(g: TrackGraph, a: string, b: string): LngLat[] | undefined {
+  function searchTrack(g: TrackGraph, a: string, b: string, from?: number): { path: LngLat[]; end: number } | undefined {
     const { adj: trackAdj, coord } = g;
-    const sources = trackNodesFor(g, a);
+    const sources = from !== undefined && trackAdj.has(from) ? [from] : trackNodesFor(g, a);
     const targets = new Set(trackNodesFor(g, b));
     if (!sources.length || !targets.size) return undefined;
     const limit = dist(stations[a], stations[b]) * 3 + 1500;
@@ -302,7 +343,7 @@ function buildLine(def: LineDef): NetworkLine {
     if (hit === undefined) return undefined;
     const out: LngLat[] = [];
     for (let u: number | undefined = hit; u !== undefined; u = prev.get(u)) out.push(coord.get(u)!);
-    return simplify(out.reverse(), 3);
+    return { path: simplify(out.reverse(), 3), end: hit };
   }
 
   function stationPath(from: string, to: string): string[] {
@@ -330,12 +371,15 @@ function buildLine(def: LineDef): NetworkLine {
     if (c.loop) legs.push([names.at(-1)!, names[0]]);
     const p: LngLat[] = [];
     const at: number[] = [];
+    let end: number | undefined;
     for (const [a, b] of legs) {
-      const seg = trackPath(a, b);
+      const seg = trackPath(a, b, end);
+      end = seg.end;
       at.push(p.length ? p.length - 1 : 0);
-      p.push(...(p.length ? seg.slice(1) : seg));
+      p.push(...(p.length ? seg.path.slice(1) : seg.path));
     }
     if (!c.loop) at.push(p.length - 1);
+    despike(p, at);
     // Station markers sit on the drawn track.
     names.forEach((n, i) => {
       if (!(n in stations)) return;
@@ -348,6 +392,11 @@ function buildLine(def: LineDef): NetworkLine {
   for (const n of Object.keys(stations)) if (!used.has(n)) {
     warn(`${def.name}: station ${n} isn't on any chain`);
     delete stations[n];
+  }
+
+  for (const c of chains) {
+    const turns = sharpTurns(c.path);
+    if (turns) warn(`${def.name}: ${turns} turn(s) sharper than 100° in ${c.stations[0]}→${c.stations.at(-1)}`);
   }
 
   const total = chains.reduce((s, c) => s + pathLength(c.path), 0);

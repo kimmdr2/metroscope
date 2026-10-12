@@ -23,6 +23,11 @@ export interface LineDef {
    * a chain by fractional station index, and headway gaps are measured along a chain.
    */
   chains: ChainDef[];
+  /** Fills gaps in OpenStreetMap: stations missing from the routes, and missing station links. */
+  patch?: {
+    stations?: Record<string, [number, number]>;
+    links?: [string, string][];
+  };
 }
 
 // Skip-stop services would add false "adjacent station" edges.
@@ -80,7 +85,9 @@ export const LINES: LineDef[] = [
   },
   {
     id: "K", name: "경의중앙선", short: "경의", color: "#77C4A3", apiIds: ["1063", "1061"], osm: /^경의·중앙선/,
-    chains: [{ via: ["문산", "용산", "왕십리", "청량리", "용문"] }, { via: ["가좌", "서울"] }],
+    chains: [{ via: ["문산", "용산", "왕십리", "청량리", "용문", "지평"] }, { via: ["가좌", "서울"] }],
+    // OSM's 지평 route lists only 지평 and 원덕.
+    patch: { links: [["용문", "지평"]] },
   },
   {
     id: "A", name: "공항철도", short: "공항", color: "#0090D2", apiIds: ["1065"], osm: /^인천국제공항철도 일반/,
@@ -117,6 +124,8 @@ export const LINES: LineDef[] = [
   {
     id: "GA", name: "GTX-A", short: "A", color: "#9A6292", apiIds: ["1032"], osm: /^수도권 광역급행철도 A선/,
     chains: [{ via: ["운정중앙", "서울"] }, { via: ["수서", "동탄"] }],
+    // OSM's routes skip 성남; its platforms are under 경강선 성남.
+    patch: { stations: { 성남: [127.11868, 37.39466] }, links: [["수서", "성남"], ["성남", "구성"]] },
   },
   {
     id: "GP", name: "김포골드라인", short: "김포", color: "#A17800", apiIds: [], osm: /^김포 골드라인/,

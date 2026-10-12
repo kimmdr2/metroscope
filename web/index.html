@@ -24,6 +24,7 @@
         <span id="source" class="badge">연결 중</span>
       </div>
       <div class="clock"><time id="clock">--:--:--</time><span id="date"></span></div>
+      <p id="age" class="age"></p>
     </header>
 
     <dl class="stats">
@@ -41,7 +42,7 @@
         <button type="button" role="radio" data-mode="gaps" aria-checked="false">배차 간격</button>
       </div>
       <div class="buttons">
-        <button id="sound" type="button" class="chip" aria-pressed="false" title="도착할 때마다 소리 (화면 위쪽일수록 높은 음)">
+        <button id="sound" type="button" class="chip" aria-pressed="false" title="따라가는 열차의 소리 (주행음·도착·출발)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path class="on" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
           <span>소리</span>
         </button>
@@ -53,6 +54,11 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
           <span>전체</span>
         </button>
+      </div>
+      <div class="segmented three" role="radiogroup" aria-label="테마">
+        <button type="button" role="radio" data-theme-choice="auto" aria-checked="true" title="서울의 실제 해 위치에 따라 낮·노을·밤">자동</button>
+        <button type="button" role="radio" data-theme-choice="light" aria-checked="false">라이트</button>
+        <button type="button" role="radio" data-theme-choice="dark" aria-checked="false">다크</button>
       </div>
     </div>
 
@@ -73,12 +79,25 @@
 
     <footer>
       열차 위치 <a href="https://data.seoul.go.kr" target="_blank" rel="noopener">서울 열린데이터광장</a> ·
-      노선 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>
+      노선 <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a> ·
+      소리 <a href="https://commons.wikimedia.org/wiki/File:Seoul_subway_line_3_Jongro-samga_~_Express_bus_terminal.ogg" target="_blank" rel="noopener">콩가루</a>,
+      <a href="https://commons.wikimedia.org/wiki/File:London_Underground_1996_Stock_train_arriving_in_a_station.ogg" target="_blank" rel="noopener">Philt3r</a> (CC BY 4.0)
     </footer>
   </aside>
 
-  <div id="train-card" class="glass" hidden>
-    <div class="train-head">
+  <div id="station-card" class="card glass" hidden>
+    <div class="card-head">
+      <div>
+        <strong id="sc-title"></strong>
+        <div id="sc-lines" class="sc-lines" role="tablist" aria-label="노선"></div>
+      </div>
+      <button id="sc-close" type="button" class="icon" aria-label="닫기">×</button>
+    </div>
+    <div id="sc-board" class="board" aria-live="polite"></div>
+  </div>
+
+  <div id="train-card" class="card glass" hidden>
+    <div class="card-head">
       <span id="tc-badge" class="line-badge"></span>
       <div>
         <strong id="tc-title"></strong>

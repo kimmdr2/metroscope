@@ -1,5 +1,5 @@
 import { segmentLengths } from "../network.js";
-import type { Arrival, Direction, Feed, Network, Snapshot, Train } from "../types.js";
+import type { Arrival, Board, BoardItem, Direction, Feed, Network, Snapshot, Train } from "../types.js";
 
 interface SimTrain extends Train {
   speed: number; // meters per second (real time)
@@ -55,6 +55,49 @@ export class MockFeed implements Feed {
         }
       });
     }
+  }
+
+  /** Upcoming trains at a station, estimated from the simulation (speed, track length, dwells). */
+  board(lineId: string, station: string): Board | undefined {
+    const groups = new Map<string, (BoardItem & { eta: number })[]>();
+    const now = Date.now();
+    for (const c of this.chains) {
+      if (c.line !== lineId) continue;
+      const idx = c.stations.indexOf(station);
+      if (idx < 0) continue;
+      for (const t of this.trains) {
+        if (t.line !== lineId || t.chain !== c.chain) continue;
+        let ahead = (idx - t.pos) * t.dir;
+        if (c.loop) ahead = ((ahead % c.n) + c.n) % c.n;
+        if (ahead < 0 || ahead > 12) continue;
+        // Track meters to go, plus ~35s at each station on the way, in simulated time.
+        let meters = 0;
+        for (let k = 0; k < Math.ceil(ahead - 1e-9); k++) {
+          const i = t.dir > 0 ? Math.floor(t.pos) + k : Math.ceil(t.pos) - 1 - k;
+          const frac = k === 0 ? (t.dir > 0 ? 1 - (t.pos % 1) : t.pos % 1 || 1) : 1;
+          meters += c.seg[((i % c.seg.length) + c.seg.length) % c.seg.length] * frac;
+        }
+        const simSeconds = meters / t.speed + Math.max(0, Math.ceil(ahead) - 1) * 35 + t.dwell;
+        const eta = now + (simSeconds / this.timeScale) * 1000;
+        const next = c.stations[c.loop ? (((idx + t.dir) % c.n) + c.n) % c.n : idx + t.dir];
+        const heading = next ? `${next}방면` : "종착";
+        const stops = Math.ceil(ahead - 1e-9);
+        const msg = stops === 0 ? `${station} 도착` : stops === 1 ? "전역 출발" : `${stops}번째 전역`;
+        const list = groups.get(heading) ?? [];
+        list.push({ train: t.id, dest: t.dest, msg, at: eta, eta });
+        groups.set(heading, list);
+      }
+    }
+    if (!groups.size) return;
+    return {
+      line: lineId,
+      station,
+      ts: now,
+      groups: [...groups].map(([heading, items]) => ({
+        heading,
+        items: items.sort((a, b) => a.eta - b.eta).slice(0, 3).map(({ eta: _, ...item }) => item),
+      })),
+    };
   }
 
   private terminus(c: SimChain, dir: Direction) {
