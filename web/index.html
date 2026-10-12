@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>metroscope</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+KR:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <svg id="map" viewBox="0 0 1000 1000" role="img" aria-label="2호선 실시간 열차 위치">
+      <g id="tracks"></g>
+      <g id="gaps"></g>
+      <g id="stations"></g>
+      <g id="ripples"></g>
+      <g id="trains"></g>
+      <g id="center">
+        <text id="line-name" x="500" y="480" text-anchor="middle">2호선</text>
+        <text id="clock" x="500" y="530" text-anchor="middle">--:--:--</text>
+        <text id="hint" x="500" y="565" text-anchor="middle">바깥 외선 · 안쪽 내선</text>
+      </g>
+    </svg>
+
+    <aside>
+      <header>
+        <h1>metroscope</h1>
+        <span id="source" class="badge">연결 중</span>
+      </header>
+
+      <dl class="stats">
+        <div><dt>운행 중</dt><dd id="stat-trains">–</dd></div>
+        <div><dt>평균 간격</dt><dd id="stat-avg">–</dd></div>
+        <div class="wide"><dt>가장 긴 공백</dt><dd id="stat-max">–</dd></div>
+      </dl>
+
+      <button id="sound" type="button" aria-pressed="false">🔈 소리 켜기</button>
+
+      <ul class="legend">
+        <li><i style="--c: var(--gap-bunch)"></i>몰림 (1역 미만)</li>
+        <li><i style="--c: var(--gap-ok)"></i>정상</li>
+        <li><i style="--c: var(--gap-wide)"></i>넓음 (4역+)</li>
+        <li><i style="--c: var(--gap-hole)"></i>공백 (6역+)</li>
+      </ul>
+    </aside>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
