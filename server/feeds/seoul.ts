@@ -19,7 +19,7 @@ interface ArrivalRow {
 
 // How precisely each code pins the train down; the most precise of a train's latest rows wins.
 const RANK: Record<string, number> = { "0": 0, "1": 0, "2": 0, "3": 1, "5": 1, "4": 2, "99": 3 };
-// Rows older than this (vs. the newest row) are trains that have left service.
+// Rows older than this are trains that have left service.
 const STALE_MS = 8 * 60_000;
 
 interface Placed {
@@ -71,17 +71,20 @@ export class SeoulFeed implements Feed {
 
     for (const r of rows) this.stationName.set(r.statnId, normalizeStation(r.statnNm));
 
-    // Freshest, most precise row per train.
-    const newest = rows.reduce((m, r) => Math.max(m, kstTime(r.recptnDt) || 0), 0);
+    // Freshest, most precise row per train. Some rows carry timestamps in the future (seen:
+    // 8호선 at 23:58 in the afternoon, 신분당선 minutes ahead), so they're clamped to now rather
+    // than trusted as the reference clock.
+    const now = Date.now();
+    const time = (r: ArrivalRow) => Math.min(kstTime(r.recptnDt) || 0, now);
     const best = new Map<string, ArrivalRow>();
     for (const r of rows) {
       const line = this.lineByApi.get(r.subwayId);
       if (!line || !r.btrainNo) continue;
-      const t = kstTime(r.recptnDt);
-      if (!(newest - t < STALE_MS)) continue;
+      const t = time(r);
+      if (now - t > STALE_MS) continue;
       const id = `${line.id}:${r.btrainNo}`;
       const cur = best.get(id);
-      const better = !cur || t > kstTime(cur.recptnDt) || (t === kstTime(cur.recptnDt) && (RANK[r.arvlCd] ?? 9) < (RANK[cur.arvlCd] ?? 9));
+      const better = !cur || t > time(cur) || (t === time(cur) && (RANK[r.arvlCd] ?? 9) < (RANK[cur.arvlCd] ?? 9));
       if (better) best.set(id, r);
     }
 
@@ -138,8 +141,8 @@ export class SeoulFeed implements Feed {
     const n = chain.stations.length;
     const idxOf = (name: string | undefined) => (name && name !== S ? index.get(name)?.find((o) => o.chain === opt.chain)?.idx : undefined);
     const s = opt.idx;
-    const f = idxOf(F);
-    const t = idxOf(T);
+    let f = idxOf(F);
+    let t = idxOf(T);
 
     const signed = (from: number, to: number) => {
       let d = to - from;
@@ -147,10 +150,21 @@ export class SeoulFeed implements Feed {
       return d;
     };
     const dest = r.bstatnNm ? normalizeStation(r.bstatnNm) : undefined;
+    // On a line with ends, the destination says which way the train is going. On loops it
+    // doesn't (a train may go the long way round), so there the previous/next ids decide.
+    const toDest = chain.loop ? undefined : this.towards(line, opt.chain, s, dest);
+    // "99 운행중" rows are about a station up ahead; the train itself is at arvlMsg3.
+    const here = r.arvlCd === "99" ? idxOf(normalizeStation(r.arvlMsg3 ?? "")) : undefined;
     let dir: Direction;
-    if (f !== undefined) dir = signed(f, s) >= 0 ? 1 : -1;
+    if (here !== undefined && signed(here, s) !== 0) dir = signed(here, s) > 0 ? 1 : -1;
+    else if (toDest !== undefined) {
+      dir = toDest;
+      // Some lines (공항철도) report previous and next station swapped.
+      const flipped = f !== undefined ? signed(f, s) * dir < 0 : t !== undefined && signed(s, t) * dir < 0;
+      if (flipped) [f, t] = [t, f];
+    } else if (f !== undefined) dir = signed(f, s) >= 0 ? 1 : -1;
     else if (t !== undefined) dir = signed(s, t) >= 0 ? 1 : -1;
-    else dir = this.towards(line, opt.chain, s, dest) ?? (s === 0 ? -1 : 1);
+    else dir = s === 0 ? -1 : 1; // at a chain end with nothing else to go on
 
     const prev = f ?? s - dir; // previous stop (may be several stations back for express trains)
     let pos: number;
@@ -163,10 +177,8 @@ export class SeoulFeed implements Feed {
       case "3": pos = prev + signed(prev, s) * 0.4; break; // 전역출발
       case "4": pos = prev - dir * 0.15; break; // 전역진입
       case "5": pos = prev; moving = false; break; // 전역도착
-      default: {
-        const here = index.get(normalizeStation(r.arvlMsg3 ?? ""))?.find((o) => o.chain === opt.chain);
-        pos = here?.idx ?? prev;
-      }
+      default:
+        pos = here ?? prev;
     }
     pos = chain.loop ? ((pos % n) + n) % n : Math.min(n - 1, Math.max(0, pos));
 
