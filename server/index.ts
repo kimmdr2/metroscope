@@ -54,6 +54,11 @@ app.get("/events", (req, res) => {
   req.on("close", () => clients.delete(res));
 });
 
+// Proxies like Cloudflare drop streams idle for ~100s (e.g. during the night pause).
+setInterval(() => {
+  for (const c of clients) c.write(": ping\n\n");
+}, 30_000);
+
 const port = Number(process.env.PORT ?? 3000);
 app.listen(port, () => {
   console.log(`metroscope on http://localhost:${port} (${apiKey ? "live" : "mock"} feed)`);
