@@ -143,6 +143,8 @@ export const LINES: LineDef[] = [
 // Realtime API name -> OpenStreetMap name, where they disagree (usually a recent rename).
 const API_ALIASES: Record<string, string> = {
   지제: "평택지제",
+  "4.19 민주묘지": "4.19민주묘지",
+  세종왕릉: "세종대왕릉",
 };
 
 /** "서울대입구(관악구청)" -> "서울대입구", "서울역" -> "서울", "방배 (백석예술대)" -> "방배" */
