@@ -149,6 +149,17 @@ const API_ALIASES: Record<string, string> = {
   응암순환: "응암",
 };
 
+// Same, but only on one line: "총신대입구(이수)" is 총신대입구 on 4호선 and 이수 on 7호선.
+const LINE_ALIASES: Record<string, Record<string, string>> = {
+  "7": { 총신대입구: "이수" },
+};
+
+/** normalizeStation, plus aliases that only apply on `lineId`. */
+export const stationOnLine = (lineId: string, name: string) => {
+  const n = normalizeStation(name);
+  return LINE_ALIASES[lineId]?.[n] ?? n;
+};
+
 /** "서울대입구(관악구청)" -> "서울대입구", "서울역" -> "서울", "방배 (백석예술대)" -> "방배" */
 export const normalizeStation = (name: string) => {
   const n = name.replace(/\s*\(.*\)\s*$/, "").replace(/역$/, "").trim();
