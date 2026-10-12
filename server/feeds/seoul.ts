@@ -40,7 +40,8 @@ export class SeoulFeed implements Feed {
     for (const r of rows) {
       const station = this.line.stations.indexOf(normalizeStation(r.statnNm));
       if (station === -1) continue; // branch line or unknown station
-      const dir: Direction = r.updnLine === "1" ? 1 : -1;
+      // Verified against live data: 내선 ("0") runs in station-list order.
+      const dir: Direction = r.updnLine === "0" ? 1 : -1;
       const offset = STATUS_OFFSET[r.trainSttus] ?? 0;
       const pos = (((station + dir * offset) % n) + n) % n;
       trains.push({ id: r.trainNo, dir, pos, dest: r.statnTnm, express: r.directAt === "1" });

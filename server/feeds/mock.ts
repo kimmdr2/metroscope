@@ -23,7 +23,7 @@ export class MockFeed implements Feed {
     for (const dir of [1, -1] as Direction[]) {
       for (let i = 0; i < trainsPerDir; i++) {
         this.trains.push({
-          id: `${dir > 0 ? "O" : "I"}${2000 + i}`,
+          id: `${dir > 0 ? "I" : "O"}${2000 + i}`,
           dir,
           pos: Math.random() * n,
           speed: (1 / 120) * (0.85 + Math.random() * 0.3), // ~2 min between stations

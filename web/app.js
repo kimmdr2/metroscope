@@ -3,7 +3,7 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
 const C = 500; // center
 const R = 330; // base radius
-const TRACK = { 1: R + 16, [-1]: R - 16 }; // 외선 outside, 내선 inside
+const TRACK = { 1: R - 16, [-1]: R + 16 }; // 내선 (+1, clockwise) inside, 외선 outside
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, parent) => {
@@ -15,8 +15,15 @@ const el = (tag, attrs = {}, parent) => {
 
 let stations = [];
 let n = 0;
-/** id -> { dir, pos (displayed), target, node } */
+/** id -> { dir, pos (displayed), target, base (last reported), node } */
 const trains = new Map();
+
+// Live data arrives only every ~75s, so between updates we nudge trains forward
+// at a typical running speed (~2 min per station), capped so we never overshoot far.
+const EXTRAPOLATE_SPEED = 1 / 120; // stations per second
+const EXTRAPOLATE_MAX = 0.8; // stations
+let live = false;
+let receivedAt = 0;
 
 const angleOf = (pos) => -Math.PI / 2 + (2 * Math.PI * pos) / n;
 const point = (pos, r) => [C + r * Math.cos(angleOf(pos)), C + r * Math.sin(angleOf(pos))];
@@ -97,7 +104,7 @@ function updateStats(gaps) {
   $("stat-avg").textContent = `${avg.toFixed(1)}역`;
   const max = gaps.reduce((m, x) => (x.span > m.span ? x : m));
   const name = (p) => stations[Math.round(wrap(p)) % n];
-  const dirName = max.dir === 1 ? "외선" : "내선";
+  const dirName = max.dir === 1 ? "내선" : "외선";
   $("stat-max").textContent = `${dirName} ${name(max.from)} → ${name(max.to)} (${max.span.toFixed(1)}역)`;
 }
 
@@ -109,17 +116,20 @@ function applySnapshot(snap) {
   const badge = $("source");
   badge.textContent = snap.source === "live" ? "● LIVE" : "SIMULATION";
   badge.className = `badge ${snap.source}`;
+  live = snap.source === "live";
+  receivedAt = performance.now();
 
   const seen = new Set();
   for (const t of snap.trains) {
     seen.add(t.id);
     let cur = trains.get(t.id);
     if (!cur) {
-      const node = el("circle", { r: 7, class: `train ${t.dir === 1 ? "out" : "in"}` }, $("trains"));
+      const node = el("circle", { r: 7, class: `train ${t.dir === 1 ? "in" : "out"}` }, $("trains"));
       node.appendChild(el("title")).textContent = `${t.id}${t.dest ? ` · ${t.dest}행` : ""}`;
-      cur = { dir: t.dir, pos: t.pos, target: t.pos, node };
+      cur = { dir: t.dir, pos: t.pos, target: t.pos, base: t.pos, node };
       trains.set(t.id, cur);
     }
+    cur.base = t.pos;
     cur.target = t.pos;
   }
   for (const [id, t] of trains) {
@@ -137,7 +147,9 @@ function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
   const k = 1 - Math.exp(-dt * 2.5); // smooth toward target
+  const ahead = live ? Math.min(((now - receivedAt) / 1000) * EXTRAPOLATE_SPEED, EXTRAPOLATE_MAX) : 0;
   for (const t of trains.values()) {
+    if (live) t.target = wrap(t.base + t.dir * ahead);
     let d = wrap(t.target - t.pos);
     if (d > n / 2) d -= n; // shortest way around the loop
     t.pos = wrap(t.pos + d * k);
