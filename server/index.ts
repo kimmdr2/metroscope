@@ -1,5 +1,7 @@
 import "dotenv/config";
 import express, { type Response } from "express";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MockFeed } from "./feeds/mock.js";
@@ -55,9 +57,23 @@ async function tick() {
 }
 
 const app = express();
-app.use(express.static(path.join(root, "web")));
-app.use("/vendor/maplibre-gl", express.static(path.join(root, "node_modules", "maplibre-gl", "dist"), { maxAge: "7d" }));
-app.get("/network.json", (_req, res) => res.sendFile(NETWORK_FILE, { maxAge: "1h" }));
+// Cloudflare stretches browser caching of .js/.css to 4 hours whatever we send, so a returning
+// visitor would pair a fresh index.html with last deploy's scripts. Instead every asset lives
+// under /v/<hash of its contents>/: each deploy gets new URLs, and those can be cached forever.
+const webDir = path.join(root, "web");
+const maplibreDir = path.join(root, "node_modules", "maplibre-gl", "dist");
+const hash = createHash("sha1");
+for (const f of fs.readdirSync(webDir).sort()) hash.update(f).update(fs.readFileSync(path.join(webDir, f)));
+hash.update(fs.readFileSync(NETWORK_FILE)).update(fs.readFileSync(path.join(maplibreDir, "..", "package.json")));
+const assets = `/v/${hash.digest("hex").slice(0, 12)}`;
+// In dev, web files change without a server restart, so don't let the browser keep them.
+const cache = process.env.NODE_ENV === "production" ? { maxAge: "1y", immutable: true } : { maxAge: 0 };
+
+const indexHtml = fs.readFileSync(path.join(webDir, "index.html"), "utf8").replaceAll("{{assets}}", assets);
+app.get(["/", "/index.html"], (_req, res) => res.set("Cache-Control", "no-cache").type("html").send(indexHtml));
+app.use(assets, express.static(webDir, { ...cache, index: false }));
+app.use(`${assets}/vendor/maplibre-gl`, express.static(maplibreDir, cache));
+app.get(`${assets}/network.json`, (_req, res) => res.sendFile(NETWORK_FILE, cache));
 
 app.get("/events", (req, res) => {
   res.set({
