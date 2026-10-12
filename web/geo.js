@@ -96,7 +96,9 @@ export function ribbon(coords, width) {
   const mx = (R * Math.PI) / 180; // meters per degree latitude
   const toXY = ([lng, lat]) => [lng * mx * Math.cos(lat0), lat * mx];
   const toLL = ([x, y]) => [x / (mx * Math.cos(lat0)), y / mx];
-  const pts = coords.map(toXY);
+  // Drop near-duplicate points: a zero-length step has no direction and would pinch the ribbon.
+  const pts = coords.map(toXY).filter((p, i, all) => i === 0 || Math.hypot(p[0] - all[i - 1][0], p[1] - all[i - 1][1]) > 0.5);
+  if (pts.length < 2) return null;
   const left = [];
   const right = [];
   for (let i = 0; i < pts.length; i++) {

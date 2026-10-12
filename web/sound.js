@@ -1,83 +1,87 @@
-// Arrival chimes. Pitch follows height on screen (north = higher), stereo follows left/right,
-// so the sound is a map of what you're looking at.
+// Sounds of the train you're following: running noise between stations, the train pulling in,
+// and pulling out again. Real recordings (see README for credits).
 
-// Major pentatonic over three octaves, so any combination of arrivals sounds consonant.
-const SCALE = [0, 2, 4, 7, 9];
-const STEPS = 15;
-const MAX_PER_SECOND = 8;
+const FILES = { run: "sounds/run-loop.mp3", arrive: "sounds/arrive.mp3", depart: "sounds/depart.mp3" };
+// The departure recording opens with ~8s of doors closing on the platform; the visible train is
+// already moving by the time we know it left, so start where the motors pick up.
+const DEPART_FROM = 8.5;
 
 let ctx = null;
-let out = null;
-let tokens = MAX_PER_SECOND;
-let refilled = 0;
+let master = null;
+let buffers = null;
+let run = null; // { src, gain }
+let enabled = false;
+let oneShot = null;
 
-function setup() {
+async function setup() {
   ctx = new AudioContext();
-  const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -18;
-  comp.ratio.value = 4;
-  const master = ctx.createGain();
+  master = ctx.createGain();
   master.gain.value = 0.9;
-
-  // Small generated room so overlapping notes blend instead of clicking.
-  const verb = ctx.createConvolver();
-  const len = ctx.sampleRate * 2.4;
-  const ir = ctx.createBuffer(2, len, ctx.sampleRate);
-  for (let ch = 0; ch < 2; ch++) {
-    const d = ir.getChannelData(ch);
-    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len) ** 3;
-  }
-  verb.buffer = ir;
-  const wet = ctx.createGain();
-  wet.gain.value = 0.28;
-
-  out = ctx.createGain();
-  out.connect(master);
-  out.connect(verb).connect(wet).connect(master);
-  master.connect(comp).connect(ctx.destination);
+  master.connect(ctx.destination);
+  const load = async (url) => ctx.decodeAudioData(await (await fetch(new URL(url, import.meta.url))).arrayBuffer());
+  buffers = Object.fromEntries(await Promise.all(Object.entries(FILES).map(async ([k, url]) => [k, await load(url)])));
 }
 
 export async function setSound(on) {
-  if (!ctx) setup();
-  if (on) await ctx.resume();
-  else await ctx.suspend();
+  enabled = on;
+  if (on) {
+    if (!ctx) await setup();
+    await ctx.resume();
+  } else {
+    stopAll();
+    await ctx?.suspend();
+  }
 }
 
-export const soundOn = () => ctx?.state === "running";
-
-/** x, y in 0..1 screen space. */
-export function chime(x, y, bright = false) {
-  if (!soundOn()) return;
-  const now = ctx.currentTime;
-  tokens = Math.min(MAX_PER_SECOND, tokens + (now - refilled) * MAX_PER_SECOND);
-  refilled = now;
-  if (tokens < 1) return;
-  tokens -= 1;
-
-  const step = Math.round((1 - Math.min(1, Math.max(0, y))) * (STEPS - 1));
-  const semis = 12 * Math.floor(step / SCALE.length) + SCALE[step % SCALE.length];
-  const freq = 220 * 2 ** (semis / 12); // A3 up
-
-  const osc = ctx.createOscillator();
-  const overtone = ctx.createOscillator();
+function ensureRun() {
+  if (run || !buffers) return;
+  const src = ctx.createBufferSource();
+  src.buffer = buffers.run;
+  src.loop = true;
+  // Skip the encoder padding at both ends so the loop seam stays silent.
+  src.loopStart = 0.06;
+  src.loopEnd = buffers.run.duration - 0.06;
   const gain = ctx.createGain();
-  const pan = ctx.createStereoPanner();
-  osc.type = "triangle";
-  osc.frequency.value = freq;
-  overtone.type = "sine";
-  overtone.frequency.value = freq * (bright ? 3 : 2);
-  const og = ctx.createGain();
-  og.gain.value = 0.18;
-  pan.pan.value = Math.min(1, Math.max(-1, x * 2 - 1)) * 0.8;
-
-  gain.gain.setValueAtTime(0, now);
-  gain.gain.linearRampToValueAtTime(0.06, now + 0.012);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.8);
-  osc.connect(gain);
-  overtone.connect(og).connect(gain);
-  gain.connect(pan).connect(out);
-  osc.start(now);
-  overtone.start(now);
-  osc.stop(now + 1.9);
-  overtone.stop(now + 1.9);
+  gain.gain.value = 0;
+  src.connect(gain).connect(master);
+  src.start(0, 0.06);
+  run = { src, gain };
 }
+
+function play(name, offset = 0, volume = 1) {
+  if (!enabled || !buffers) return;
+  oneShot?.stop();
+  const src = ctx.createBufferSource();
+  src.buffer = buffers[name];
+  const gain = ctx.createGain();
+  gain.gain.value = volume;
+  src.connect(gain).connect(master);
+  src.start(0, offset);
+  src.onended = () => oneShot === src && (oneShot = null);
+  oneShot = src;
+}
+
+/**
+ * Called every frame while following a train.
+ * `speed` m/s (shown motion); `event` is "arrive", "depart" or null.
+ */
+export function followSound(speed, event) {
+  if (!enabled || !buffers) return;
+  ensureRun();
+  // Running noise swells with speed and ducks under the arrival/departure recordings.
+  const target = oneShot ? 0.15 : Math.min(1, speed / 14) * 0.8;
+  run.gain.gain.setTargetAtTime(target, ctx.currentTime, 0.6);
+  if (event === "arrive") play("arrive", 0, 1);
+  if (event === "depart") play("depart", DEPART_FROM, 0.9);
+}
+
+export function stopAll() {
+  oneShot?.stop();
+  oneShot = null;
+  if (run) {
+    run.src.stop();
+    run = null;
+  }
+}
+
+export const soundEnabled = () => enabled;

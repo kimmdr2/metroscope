@@ -63,7 +63,10 @@ const app = express();
 const webDir = path.join(root, "web");
 const maplibreDir = path.join(root, "node_modules", "maplibre-gl", "dist");
 const hash = createHash("sha1");
-for (const f of fs.readdirSync(webDir).sort()) hash.update(f).update(fs.readFileSync(path.join(webDir, f)));
+for (const f of (fs.readdirSync(webDir, { recursive: true }) as string[]).sort()) {
+  const file = path.join(webDir, f);
+  if (fs.statSync(file).isFile()) hash.update(f).update(fs.readFileSync(file));
+}
 hash.update(fs.readFileSync(NETWORK_FILE)).update(fs.readFileSync(path.join(maplibreDir, "..", "package.json")));
 const assets = `/v/${hash.digest("hex").slice(0, 12)}`;
 // In dev, web files change without a server restart, so don't let the browser keep them.
@@ -74,6 +77,13 @@ app.get(["/", "/index.html"], (_req, res) => res.set("Cache-Control", "no-cache"
 app.use(assets, express.static(webDir, { ...cache, index: false }));
 app.use(`${assets}/vendor/maplibre-gl`, express.static(maplibreDir, cache));
 app.get(`${assets}/network.json`, (_req, res) => res.sendFile(NETWORK_FILE, cache));
+
+app.get("/api/board", (req, res) => {
+  const board = feed.board(String(req.query.line ?? ""), String(req.query.station ?? ""));
+  res.set("Cache-Control", "no-store");
+  if (!board) return res.status(404).json({ error: "no data" });
+  res.json(board);
+});
 
 app.get("/events", (req, res) => {
   res.set({
