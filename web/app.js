@@ -17,6 +17,7 @@ const RUN_SPEED = 11; // m/s
 // Train bodies, in meters. Width and height are exaggerated so they read at city zoom.
 const TRAIN = { length: 170, width: 34, height: 40 };
 const ZOOM_3D = 12.8; // dots hand over to 3D bodies around here
+const SIDE_PX = 6; // trains keep this far right of their direction of travel
 const GAP_COLORS = { bunch: "#5eead4", ok: "#3f8f5c", wide: "#f59e0b", hole: "#ef4444" };
 // Trains are re-uploaded to the map at most this often; the map itself still renders every frame.
 const TRAIN_FRAME_MS = mobile || coarse ? 50 : 33;
@@ -360,8 +361,8 @@ function addLayers() {
       "line-color": ["get", "color"],
       "line-width": byZoom(WIDTHS, (v) => v * 2.6 + 2),
       "line-blur": byZoom(WIDTHS, (v) => v * 0.6),
-      // Same side as the arrow (right of travel); drawn in chain order, so flip for dir -1.
-      "line-offset": byZoom(WIDTHS, (v) => ["*", ["get", "dir"], v * 0.8 + 2]),
+      // Same side as the train (right of travel, SIDE_PX); drawn in chain order, so flip for dir -1.
+      "line-offset": ["*", ["get", "dir"], SIDE_PX],
     },
   });
   map.addLayer({
@@ -397,22 +398,21 @@ function addLayers() {
       "icon-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
     },
   });
-  // On the dot it's a white chevron; close up it grows, takes the line color with a white outline
-  // and floats above the 3D train.
+  // The chevron is part of the train: white, centered on the dot.
   const chevron = marker("train-arrow", "train-chevron", dotSize());
-  chevron.layout["icon-size"] = ["interpolate", ["linear"], ["zoom"], 8, ["case", ["get", "express"], 0.42, 0.36], 11, ["case", ["get", "express"], 0.58, 0.5], ZOOM_3D - 0.2, ["case", ["get", "express"], 0.73, 0.65], ZOOM_3D + 0.6, 1.3, 17, 1.7];
+  chevron.layout["icon-size"] = ["interpolate", ["linear"], ["zoom"], 8, ["case", ["get", "express"], 0.42, 0.36], 11, ["case", ["get", "express"], 0.58, 0.5], ZOOM_3D, ["case", ["get", "express"], 0.74, 0.66], 17, ["case", ["get", "express"], 1.15, 1.05]];
   map.addLayer({
     ...chevron,
     paint: {
-      "icon-color": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, "#ffffff", ZOOM_3D + 0.6, ["get", "color"]],
-      "icon-halo-color": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, "rgba(10,14,20,0.55)", ZOOM_3D + 0.6, "#ffffff"],
-      "icon-halo-width": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1.2, ZOOM_3D + 0.6, 2.4],
-      "icon-translate": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, ["literal", [0, 0]], ZOOM_3D + 0.6, ["literal", [0, -36]]],
-      "icon-translate-anchor": "viewport",
+      "icon-halo-color": "rgba(10,14,20,0.55)",
+      "icon-halo-width": 1.2,
+      // Hands over to the 3D roof arrow together with the dot.
+      "icon-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
     },
   });
   map.addLayer({
     id: "train-3d", type: "fill-extrusion", source: "trains3d", minzoom: ZOOM_3D - 0.4,
+    filter: ["==", ["get", "kind"], "body"],
     paint: {
       "fill-extrusion-height": ["get", "h"],
       "fill-extrusion-base": 0,
@@ -421,8 +421,18 @@ function addLayers() {
       "fill-extrusion-vertical-gradient": false,
     },
   });
-  // The chevron goes above the 3D bodies, or a tall train would hide its own arrow.
-  map.moveLayer("train-arrow");
+  // Close up the arrow is a thin 3D shape on the train's roof: part of the train, so it keeps
+  // its place and proportion however far you zoom.
+  map.addLayer({
+    id: "train-3d-arrow", type: "fill-extrusion", source: "trains3d", minzoom: ZOOM_3D - 0.4,
+    filter: ["==", ["get", "kind"], "arrow"],
+    paint: {
+      "fill-extrusion-height": ["get", "h"],
+      "fill-extrusion-base": ["get", "b"],
+      "fill-extrusion-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.4, 0, ZOOM_3D + 0.4, 1],
+      "fill-extrusion-vertical-gradient": false,
+    },
+  });
   map.addLayer({
     id: "train-selected", type: "circle", source: "trains",
     filter: ["==", ["get", "id"], ""],
@@ -499,7 +509,8 @@ function applyFocus() {
   map.setPaintProperty("station-dot", "circle-stroke-opacity", on(isLine, 1, 0.25));
   map.setPaintProperty("train-dot", "icon-color", on(isLine, ["get", "color"], palette.dim));
   map.setPaintProperty("train-dot", "icon-halo-color", on(isLine, "#ffffff", "rgba(255,255,255,0.15)"));
-  map.setPaintProperty("train-arrow", "icon-opacity", on(isLine, 1, 0.15));
+  map.setPaintProperty("train-arrow", "icon-color", on(isLine, "#ffffff", "rgba(255,255,255,0.15)"));
+  map.setPaintProperty("train-3d-arrow", "fill-extrusion-color", on(isLine, "#ffffff", palette.dim));
   // A colored glow reads on the dark map; on the light map a soft shadow lifts the train instead.
   map.setPaintProperty("train-glow", "circle-color", on(isLine, ui === "light" ? "rgba(20,28,40,0.35)" : ["get", "color"], "rgba(0,0,0,0)"));
   map.setPaintProperty("train-trail", "line-opacity", on(isLine, ["get", "o"], 0));
@@ -724,6 +735,13 @@ function soundEvent(t) {
   return null;
 }
 
+/** `meters` to the right of someone at `ll` facing `bearing` (degrees from north). */
+function toRight(ll, bearing, meters) {
+  const r = ((bearing + 90) * Math.PI) / 180;
+  const lat = (ll[1] * Math.PI) / 180;
+  return [ll[0] + (meters * Math.sin(r)) / (111320 * Math.cos(lat)), ll[1] + (meters * Math.cos(r)) / 110540];
+}
+
 /** About how many meters one screen pixel covers right now. */
 const metersPerPixel = () => (78271.517 * Math.cos((map.getCenter().lat * Math.PI) / 180)) / 2 ** map.getZoom();
 
@@ -736,17 +754,15 @@ function renderTrains() {
   // ~45px of tail at any zoom, but never more than 1.5km of track.
   const mpp = metersPerPixel();
   const tail = Math.min(1500, 45 * mpp);
-  // Markers keep ~6px to the right of their direction of travel, so two trains passing at a
-  // station sit side by side (like the two tracks) instead of piling up. Done on the coordinates
-  // rather than with icon-offset, which drifts apart between layers on a tilted map. Close up,
-  // markers sit on the 3D body instead.
-  const side = map.getZoom() >= ZOOM_3D ? 0 : 6 * mpp;
+  // Trains keep a few pixels to the right of their direction of travel, so two trains passing at
+  // a station sit side by side (like the two tracks) instead of piling up. Done on coordinates,
+  // the same for dot, chevron and 3D body, so they stay together at every zoom (icon-offset
+  // drifts apart between layers on a tilted map).
+  const side = SIDE_PX * mpp;
   const lineOrder = [...lines.keys()];
   for (const t of trains.values()) {
     const color = lines.get(t.line).display;
-    const right = ((t.bearing + 90) * Math.PI) / 180;
-    const lat = (t.ll[1] * Math.PI) / 180;
-    const at = [t.ll[0] + (side * Math.sin(right)) / (111320 * Math.cos(lat)), t.ll[1] + (side * Math.cos(right)) / 110540];
+    const at = toRight(t.ll, t.bearing, side);
     points.push({
       type: "Feature",
       properties: { id: t.id, line: t.line, color, express: t.express, bearing: t.bearing, z: lineOrder.length - lineOrder.indexOf(t.line) },
@@ -787,15 +803,32 @@ function renderTrains() {
     }
     // Evenly spaced samples rather than raw track vertices, so a kink in the track can't twist the body.
     const centerline = [];
-    for (let i = 0; i <= 6; i++) centerline.push(pointAt(c, d1 + ((d2 - d1) * i) / 6).lngLat);
+    for (let i = 0; i <= 6; i++) {
+      const p = pointAt(c, d1 + ((d2 - d1) * i) / 6);
+      centerline.push(toRight(p.lngLat, t.dir > 0 ? p.heading : p.heading + 180, side));
+    }
     // Taper the leading end into a nose so the direction shows up close too.
     const nose = (f) => (t.dir > 0 ? f : 1 - f);
     const ring = ribbon(centerline, (f) => TRAIN.width * (nose(f) < 0.8 ? 1 : 1 - ((nose(f) - 0.8) / 0.2) * 0.75));
     if (!ring) continue;
     bodies.push({
       type: "Feature",
-      properties: { id: t.id, line: t.line, color: lines.get(t.line).display, h: TRAIN.height },
+      properties: { kind: "body", id: t.id, line: t.line, color: lines.get(t.line).display, h: TRAIN.height },
       geometry: { type: "Polygon", coordinates: [ring] },
+    });
+    // Chevron on the roof (same shape as the dot's), in meters: x to the right of travel, y forward.
+    const center = toRight(t.ll, t.bearing, side);
+    const h = (t.bearing * Math.PI) / 180;
+    const lat = (center[1] * Math.PI) / 180;
+    const at = ([x, y]) => [
+      center[0] + (x * Math.cos(h) + y * Math.sin(h)) / (111320 * Math.cos(lat)),
+      center[1] + (-x * Math.sin(h) + y * Math.cos(h)) / 110540,
+    ];
+    const arrow = [[0, 30], [17, 9], [17, -6], [0, 15], [-17, -6], [-17, 9], [0, 30]].map(at);
+    bodies.push({
+      type: "Feature",
+      properties: { kind: "arrow", id: t.id, line: t.line, b: TRAIN.height, h: TRAIN.height + 2.5 },
+      geometry: { type: "Polygon", coordinates: [arrow] },
     });
   }
   map.getSource("trains3d").setData(fc(bodies));
@@ -912,7 +945,7 @@ const tip = new maplibregl.Popup({ closeButton: false, closeOnClick: false, clas
 
 function trainAt(point) {
   const box = [[point.x - 8, point.y - 8], [point.x + 8, point.y + 8]];
-  const hit = map.queryRenderedFeatures(box, { layers: ["train-3d", "train-dot", "train-arrow"] })[0];
+  const hit = map.queryRenderedFeatures(box, { layers: ["train-3d", "train-3d-arrow", "train-dot", "train-arrow"] })[0];
   return hit && trains.get(hit.properties.id);
 }
 function stationAt(point) {
