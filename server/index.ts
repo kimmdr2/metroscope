@@ -1,5 +1,5 @@
 import "dotenv/config";
-import express, { type Response } from "express";
+import express, { type Request, type Response } from "express";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -73,7 +73,16 @@ const assets = `/v/${hash.digest("hex").slice(0, 12)}`;
 const cache = process.env.NODE_ENV === "production" ? { maxAge: "1y", immutable: true } : { maxAge: 0 };
 
 const indexHtml = fs.readFileSync(path.join(webDir, "index.html"), "utf8").replaceAll("{{assets}}", assets);
-app.get(["/", "/index.html"], (_req, res) => res.set("Cache-Control", "no-cache").type("html").send(indexHtml));
+// Link previews need absolute URLs. The public address is the one the visitor asked for (as
+// passed on by the proxy in front of us), so nothing has to be configured.
+function originOf(req: Request) {
+  const host = req.get("host") ?? "";
+  if (!/^[a-z0-9.-]+(:\d+)?$/i.test(host)) return "";
+  return `${req.get("x-forwarded-proto") === "https" ? "https" : req.protocol}://${host}`;
+}
+app.get(["/", "/index.html"], (req, res) =>
+  res.set("Cache-Control", "no-cache").type("html").send(indexHtml.replaceAll("{{origin}}", originOf(req))),
+);
 app.use(assets, express.static(webDir, { ...cache, index: false }));
 app.use(`${assets}/vendor/maplibre-gl`, express.static(maplibreDir, cache));
 app.get(`${assets}/network.json`, (_req, res) => res.sendFile(NETWORK_FILE, cache));

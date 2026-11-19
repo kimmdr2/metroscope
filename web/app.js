@@ -7,16 +7,30 @@ import { dist, distOfPos, posOfDist, pointAt, prepareChain, ribbon, slice, wrapD
 import { followSound, setSound, stopAll } from "./sound.js";
 
 const $ = (id) => document.getElementById(id);
-const mobile = matchMedia("(max-width: 720px)").matches;
+const mobileQuery = matchMedia("(max-width: 720px)");
+// Follows the window: a rotated phone or a resized browser changes layout without a reload.
+let mobile = mobileQuery.matches;
 const coarse = matchMedia("(pointer: coarse)").matches;
+const calm = matchMedia("(prefers-reduced-motion: reduce)");
+/** What the address pointed at when the page opened (see restoreLink). */
+const link = new URLSearchParams(location.hash.slice(1));
 
-const HOME = { center: [126.985, 37.548], zoom: mobile ? 9.7 : 10.7, pitch: 52, bearing: -17 };
+const HOME = {
+  center: [126.985, 37.548],
+  pitch: 52,
+  bearing: -17,
+  get zoom() {
+    return mobile ? 9.7 : 10.7;
+  },
+};
 // Live data arrives every ~75s; between updates moving trains advance at a typical speed (or the
 // speed implied by the feed's arrival countdown), but never past the next station.
 const RUN_SPEED = 11; // m/s
 // Train bodies, in meters. Width and height are exaggerated so they read at city zoom.
 const TRAIN = { length: 170, width: 34, height: 40 };
 const ZOOM_3D = 12.8; // dots hand over to 3D bodies around here
+const ZOOM_ARROW = 11.2; // direction chevrons appear on the dots from here in
+const SHEET_PEEK = 172; // px of the phone bottom sheet left showing when closed (as in style.css)
 const SIDE_PX = 6; // trains keep this far right of their direction of travel
 // Keyed by panel theme; the same values as the legend's --gap-* colors in style.css.
 const GAP_COLORS = {
@@ -26,7 +40,9 @@ const GAP_COLORS = {
 // A finger is less exact than a cursor: a tap that hits nothing looks again this far around it.
 const TOUCH_PX = 22;
 // Trains are re-uploaded to the map at most this often; the map itself still renders every frame.
-const TRAIN_FRAME_MS = mobile || coarse ? 50 : 33;
+// Zoomed out, a train takes far longer to cross a pixel, so uploads stretch out (see trainFrameMs).
+const TRAIN_FRAME_MS = coarse ? 50 : 33;
+const TRAIN_FRAME_MAX_MS = 400;
 const THEME_KEY = "metroscope:theme";
 const MERGE_M = 450;
 
@@ -59,6 +75,7 @@ let cameraBusyUntil = 0;
 /** True while the user is dragging/zooming/rotating the map. */
 let userMoving = false;
 function ease(opts) {
+  if (calm.matches) opts = { ...opts, duration: 0 };
   cameraBusyUntil = performance.now() + (opts.duration ?? 1000) + 50;
   map.easeTo(opts);
 }
@@ -94,6 +111,26 @@ function lineColor(hex, theme) {
   if (theme === "dark" && L < 0.12) return rgbToHex(hexToRgb(hex).map((c) => c + (255 - c) * 0.32));
   if (theme === "light" && L > 0.42) return rgbToHex(hexToRgb(hex).map((c) => c * 0.8));
   return hex;
+}
+/** Marks the chosen button of a radio group; only that one is a tab stop (arrow keys reach the rest). */
+function checkRadios(selector, isChosen) {
+  for (const b of document.querySelectorAll(selector)) {
+    b.setAttribute("aria-checked", String(isChosen(b)));
+    b.tabIndex = isChosen(b) ? 0 : -1;
+  }
+}
+/** Arrow keys move through, and choose from, a radio group or tab list, as those roles promise. */
+function arrowKeys(container, selector) {
+  container.addEventListener("keydown", (e) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    const items = [...container.querySelectorAll(selector)];
+    const i = items.indexOf(document.activeElement);
+    if (!step || i < 0) return;
+    e.preventDefault();
+    const next = items[(i + step + items.length) % items.length];
+    next.focus();
+    next.click();
+  });
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const badgeHtml = (line) =>
@@ -246,21 +283,38 @@ function createMap() {
     maxPitch: 72,
     maxBounds: [[125.6, 36.4], [128.4, 38.5]],
     attributionControl: { compact: true },
+    // The view lives in the address (#map=zoom/lat/lng/bearing/pitch), next to our own line= and station=.
+    hash: "map",
     // Hangul is drawn with a system font: every OS ships one, and it saves megabytes of glyph PBFs.
     localIdeographFontFamily: "'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans CJK KR', 'Noto Sans KR', sans-serif",
     fadeDuration: 200,
   });
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
   // Keep the city centered in the part of the screen the bottom sheet doesn't cover.
-  if (mobile) map.setPadding({ top: 0, bottom: 170, left: 0, right: 0 });
+  const pad = () => map.setPadding({ top: 0, bottom: mobile ? 170 : 0, left: 0, right: 0 });
+  pad();
+  mobileQuery.addEventListener("change", (e) => {
+    mobile = e.matches;
+    pad();
+  });
 
-  map.on("load", () => {
+  // Our layers go in as soon as the style is parsed: they don't depend on the base map's tiles.
+  map.once("style.load", () => {
     addLayers();
     ready = true;
     applyTheme();
     $("loading").classList.add("done");
-    // Tilt into the city.
-    ease({ ...HOME, duration: 2800, easing: (t) => 1 - (1 - t) ** 3 });
+    // A shared link opens where it was made; otherwise tilt into the city.
+    if (!restoreLink()) ease({ ...HOME, duration: 2800, easing: (t) => 1 - (1 - t) ** 3 });
+  });
+  // The base map comes from someone else's tile server. Lines and trains work without it, so when
+  // it's down say what's missing instead of leaving an unexplained blank.
+  map.on("error", (e) => {
+    console.warn("map:", e.error?.message ?? e);
+    if (e.sourceId === "omt") $("map-notice").hidden = false;
+  });
+  map.on("data", (e) => {
+    if (e.sourceId === "omt" && e.tile) $("map-notice").hidden = true;
   });
 
   // Moving the map by hand only pauses the chase cam; following ends with its button alone.
@@ -409,11 +463,13 @@ function addLayers() {
   chevron.layout["icon-size"] = ["interpolate", ["linear"], ["zoom"], 8, ["case", ["get", "express"], 0.42, 0.36], 11, ["case", ["get", "express"], 0.58, 0.5], ZOOM_3D, ["case", ["get", "express"], 0.74, 0.66], 17, ["case", ["get", "express"], 1.15, 1.05]];
   map.addLayer({
     ...chevron,
+    // From far out, hundreds of chevrons are noise, and the trail already shows the direction.
+    minzoom: ZOOM_ARROW,
     paint: {
       "icon-halo-color": "rgba(10,14,20,0.55)",
       "icon-halo-width": 1.2,
-      // Hands over to the 3D roof arrow together with the dot.
-      "icon-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
+      // Fades in on the way down, then hands over to the 3D roof arrow together with the dot.
+      "icon-opacity": ["interpolate", ["linear"], ["zoom"], ZOOM_ARROW, 0, ZOOM_ARROW + 0.5, 1, ZOOM_3D - 0.2, 1, ZOOM_3D + 0.6, 0],
     },
   });
   map.addLayer({
@@ -477,7 +533,7 @@ function applyTheme() {
   document.documentElement.dataset.theme = ui;
   document.querySelector('meta[name="theme-color"]').content = palette.bg;
   for (const l of lines.values()) l.display = lineColor(l.color, ui);
-  for (const b of document.querySelectorAll("[data-theme-choice]")) b.setAttribute("aria-checked", String(b.dataset.themeChoice === theme));
+  checkRadios("[data-theme-choice]", (b) => b.dataset.themeChoice === theme);
   if (!ready) return;
   applyPalette(map, palette);
   const key = ["get", ui === "light" ? "cl" : "cd"];
@@ -533,20 +589,62 @@ function setFocus(id, fly = true) {
   $("clear-focus").hidden = !focus;
   applyFocus();
   updateStats();
+  syncHash();
   if (focus && fly) fitTo(lines.get(focus).chains.flatMap((c) => c.path));
+}
+
+// ---------- shareable address ----------
+
+/** Keeps the focused line and the open station board in the address, beside the map's own #map=. */
+function syncHash() {
+  if (!ready) return;
+  const parts = location.hash.slice(1).split("&").filter((p) => p && !/^(line|station)=/.test(p));
+  if (focus) parts.push(`line=${encodeURIComponent(focus)}`);
+  if (board) parts.push(`station=${encodeURIComponent(`${board.name}~${board.line}`)}`);
+  const hash = parts.length ? `#${parts.join("&")}` : "";
+  if (hash === location.hash) return;
+  try {
+    history.replaceState(history.state, "", hash || location.pathname + location.search);
+  } catch {}
+}
+
+/** Opens what the address pointed at (#map=…&line=2&station=강남~2). True if that placed the camera. */
+function restoreLink() {
+  let placed = link.has("map");
+  if (placed && map.getPitch() < 1) {
+    // The link was made in the flat view.
+    tilted = false;
+    $("tilt").setAttribute("aria-pressed", "false");
+    map.setLayoutProperty("buildings", "visibility", "none");
+  }
+  const line = link.get("line");
+  if (lines.has(line)) {
+    setFocus(line, !placed);
+    placed = true;
+  }
+  // Two stations can share a name (신촌), so the board's line picks between them.
+  const [name, on] = (link.get("station") ?? "").split("~");
+  const s = name && (stations.find((x) => x.name === name && x.lines.includes(on)) ?? stations.find((x) => x.name === name));
+  if (s) {
+    openBoard(s.name, s.lines, s.lines.includes(on) ? on : undefined);
+    if (!link.has("map")) ease({ ...HOME, center: s.ll, zoom: 14.5, duration: 1200 });
+    placed = true;
+  }
+  return placed;
 }
 
 function fitTo(coords, maxZoom = 13.5) {
   const b = new maplibregl.LngLatBounds();
   for (const p of coords) b.extend(p);
   const pad = mobile ? { top: 60, bottom: 200, left: 30, right: 30 } : { top: 70, bottom: 70, left: 370, right: 80 };
-  cameraBusyUntil = performance.now() + 1650;
-  map.fitBounds(b, { padding: pad, maxZoom, pitch: tilted ? 45 : 0, bearing: tilted ? map.getBearing() : 0, duration: 1600 });
+  const duration = calm.matches ? 0 : 1600;
+  cameraBusyUntil = performance.now() + duration + 50;
+  map.fitBounds(b, { padding: pad, maxZoom, pitch: tilted ? 45 : 0, bearing: tilted ? map.getBearing() : 0, duration });
 }
 
 function setMode(m) {
   mode = m;
-  for (const b of document.querySelectorAll("[data-mode]")) b.setAttribute("aria-checked", String(b.dataset.mode === m));
+  checkRadios("[data-mode]", (b) => b.dataset.mode === m);
   $("legend").hidden = m !== "gaps";
   computeGaps();
   applyFocus();
@@ -701,12 +799,13 @@ function frame(now) {
     t.bearing = t.dir > 0 ? p.heading : p.heading + 180;
   }
 
-  if (now - lastTrains >= TRAIN_FRAME_MS) {
+  if (now - lastTrains >= trainFrameMs()) {
     lastTrains = now;
     renderTrains();
   }
   renderRipples(now);
-  if (now - lastGaps > 300) {
+  // Drawn gap bands have to keep up with the trains; the panel's numbers alone can tick slower.
+  if (now - lastGaps > (mode === "gaps" ? 300 : 1000)) {
     lastGaps = now;
     computeGaps();
   }
@@ -750,6 +849,14 @@ function toRight(ll, bearing, meters) {
 
 /** About how many meters one screen pixel covers right now. */
 const metersPerPixel = () => (78271.517 * Math.cos((map.getCenter().lat * Math.PI) / 180)) / 2 ** map.getZoom();
+
+/** How long the drawn trains can go without a re-upload before a step would show. */
+function trainFrameMs() {
+  // While the camera moves, sizes and offsets given in pixels need every frame.
+  if (map.isMoving()) return TRAIN_FRAME_MS;
+  // Time for a fast train (30 m/s) to cover 0.4px.
+  return Math.max(TRAIN_FRAME_MS, Math.min(TRAIN_FRAME_MAX_MS, ((0.4 * metersPerPixel()) / 30) * 1000));
+}
 
 // Tail pieces behind a train: [from, to] as fractions of the tail length, and their opacity.
 const TRAIL = [[0, 0.3, 0.55], [0.3, 0.65, 0.3], [0.65, 1, 0.12]];
@@ -1059,20 +1166,22 @@ function setFollow(on) {
 
 // ---------- station board ----------
 
-function openBoard(name, lineIds) {
+function openBoard(name, lineIds, line = focus && lineIds.includes(focus) ? focus : lineIds[0]) {
   if (!following) selectTrain(null);
-  board = { name, lines: lineIds, line: focus && lineIds.includes(focus) ? focus : lineIds[0], data: undefined };
+  board = { name, lines: lineIds, line, data: undefined };
   $("sc-title").textContent = name;
   $("sc-lines").innerHTML = lineIds
-    .map((id) => `<button type="button" role="tab" data-line="${esc(id)}" aria-selected="${id === board.line}" title="${esc(lines.get(id).name)}">${badgeHtml(lines.get(id))}</button>`)
+    .map((id) => `<button type="button" role="tab" data-line="${esc(id)}" aria-selected="${id === board.line}" tabindex="${id === board.line ? 0 : -1}" title="${esc(lines.get(id).name)}">${badgeHtml(lines.get(id))}</button>`)
     .join("");
   $("station-card").hidden = false;
   fetchBoard();
+  syncHash();
 }
 
 function closeBoard() {
   board = null;
   $("station-card").hidden = true;
+  syncHash();
 }
 
 async function fetchBoard() {
@@ -1246,6 +1355,55 @@ function wireSearch() {
 
 // ---------- panel ----------
 
+function setSheet(open) {
+  $("panel").dataset.open = String(open);
+  const handle = $("sheet-handle");
+  handle.setAttribute("aria-expanded", String(open));
+  handle.setAttribute("aria-label", open ? "패널 접기" : "패널 펼치기");
+}
+
+/** The phone bottom sheet: tap the handle, or drag it (or the header) up and down. */
+function wireSheet() {
+  const panel = $("panel");
+  const handle = $("sheet-handle");
+  let drag = null;
+  let draggedAt = -Infinity;
+  handle.addEventListener("click", () => {
+    // The click that ends a drag on the handle isn't a tap.
+    if (performance.now() - draggedAt > 400) setSheet(panel.dataset.open !== "true");
+  });
+  const start = (e) => {
+    if (!mobile || e.button > 0) return;
+    const closedY = panel.offsetHeight - SHEET_PEEK;
+    drag = { y: e.clientY, from: panel.dataset.open === "true" ? 0 : closedY, closedY, dy: 0, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const move = (e) => {
+    if (!drag) return;
+    drag.dy = e.clientY - drag.y;
+    if (!drag.moved && Math.abs(drag.dy) < 6) return;
+    drag.moved = true;
+    panel.style.transition = "none";
+    panel.style.transform = `translateY(${Math.max(0, Math.min(drag.closedY, drag.from + drag.dy))}px)`;
+  };
+  const end = () => {
+    if (!drag) return;
+    panel.style.transition = panel.style.transform = "";
+    if (drag.moved) {
+      draggedAt = performance.now();
+      // A short drag springs back to where it started.
+      if (Math.abs(drag.dy) > 40) setSheet(drag.dy < 0);
+    }
+    drag = null;
+  };
+  for (const el of [handle, panel.querySelector("header")]) {
+    el.addEventListener("pointerdown", start);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+  }
+}
+
 function buildLineList() {
   const ul = $("lines");
   ul.replaceChildren();
@@ -1301,6 +1459,9 @@ function wireUi() {
     ease(following && trains.get(selected) ? { ...view, center: trains.get(selected).ll } : view);
   });
   $("tilt").addEventListener("click", () => setTilt(!tilted));
+  checkRadios("[data-mode]", (b) => b.dataset.mode === mode);
+  for (const g of document.querySelectorAll('[role="radiogroup"]')) arrowKeys(g, '[role="radio"]');
+  arrowKeys($("sc-lines"), '[role="tab"]');
   $("sound").addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     const on = btn.getAttribute("aria-pressed") !== "true";
@@ -1315,8 +1476,12 @@ function wireUi() {
     if (!b || !board) return;
     board.line = b.dataset.line;
     board.data = undefined;
-    for (const x of $("sc-lines").children) x.setAttribute("aria-selected", String(x.dataset.line === board.line));
+    for (const x of $("sc-lines").children) {
+      x.setAttribute("aria-selected", String(x.dataset.line === board.line));
+      x.tabIndex = x.dataset.line === board.line ? 0 : -1;
+    }
     fetchBoard();
+    syncHash();
   });
   $("sc-board").addEventListener("click", (e) => {
     const id = e.target.closest("button[data-train]")?.dataset.train;
@@ -1327,10 +1492,7 @@ function wireUi() {
   });
   // Boards change with every poll; refetch while one is open.
   setInterval(fetchBoard, 20_000);
-  $("sheet-handle").addEventListener("click", () => {
-    const p = $("panel");
-    p.dataset.open = String(p.dataset.open !== "true");
-  });
+  wireSheet();
   addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     if (board) closeBoard();

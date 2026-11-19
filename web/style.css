@@ -7,7 +7,7 @@
   --border-strong: rgba(255, 255, 255, 0.14);
   --text: #e6edf3;
   --muted: #8592a0;
-  --faint: #56616d;
+  --faint: #76828f;
   --accent: #5eead4;
   --gap-bunch: #5eead4;
   --gap-ok: #3f8f5c;
@@ -30,7 +30,7 @@
   --border-strong: rgba(16, 24, 40, 0.16);
   --text: #1b232c;
   --muted: #5b6673;
-  --faint: #8a949f;
+  --faint: #6a7480;
   --accent: #0d9488;
   --gap-bunch: #0ea5a4;
   --gap-ok: #3f9a62;
@@ -180,7 +180,7 @@ h2 { margin: 0; font-size: 12px; font-weight: 500; color: var(--muted); }
   padding: 0 8px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  scrollbar-color: var(--border-strong) transparent;
   display: grid;
   gap: 2px;
 }
@@ -260,6 +260,7 @@ footer a:hover { color: var(--text); }
   bottom: 40px;
   width: 300px;
   max-height: calc(100vh - 140px);
+  max-height: calc(100dvh - 140px);
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -361,6 +362,21 @@ footer a:hover { color: var(--text); }
 }
 .loading span { width: 14px; height: 14px; border: 2px solid var(--border-strong); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
 .loading.done { opacity: 0; }
+
+.notice {
+  position: fixed;
+  left: 50%;
+  bottom: 40px;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: 99px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  z-index: 1;
+}
+.notice[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------- mobile: bottom sheet ---------- */
@@ -373,13 +389,19 @@ footer a:hover { color: var(--text); }
     bottom: 0;
     width: auto;
     max-height: 78vh;
+    /* dvh: what's left of the screen while the browser's own bars are showing. */
+    max-height: 78dvh;
     border-radius: 20px 20px 0 0;
     padding: 6px 16px calc(12px + env(safe-area-inset-bottom));
     gap: 14px;
     transition: transform 0.35s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
   #panel[data-open="false"] { transform: translateY(calc(100% - 172px)); }
-  #sheet-handle { display: grid; place-items: center; width: 100%; height: 22px; border: 0; background: none; cursor: pointer; padding: 0; }
+  /* Dragged by script; the browser shouldn't also scroll or pull-to-refresh. */
+  #sheet-handle, #panel header { touch-action: none; }
+  .notice { bottom: 184px; max-width: calc(100vw - 24px); white-space: normal; text-align: center; border-radius: 14px; }
+  /* flex: none, or a full sheet squeezes the handle down to its 4px bar. */
+  #sheet-handle { flex: none; display: grid; place-items: center; width: 100%; height: 22px; border: 0; background: none; cursor: pointer; padding: 0; }
   #sheet-handle span { width: 40px; height: 4px; border-radius: 2px; background: var(--border-strong); }
   #clock { font-size: 26px; }
   .stats dd { font-size: 18px; }
@@ -387,10 +409,11 @@ footer a:hover { color: var(--text); }
   #search { top: 12px; left: 12px; right: 58px; width: auto; }
   /* Under 16px, iOS zooms the whole page when the field is focused. */
   #search-input { font-size: 16px; }
-  #cards { left: 12px; right: 12px; width: auto; top: 68px; bottom: auto; max-height: 55vh; justify-content: flex-start; }
+  #cards { left: 12px; right: 12px; width: auto; top: 68px; bottom: auto; max-height: 55vh; max-height: 55dvh; justify-content: flex-start; }
   .maplibregl-ctrl-top-right { top: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .badge.live::before, .loading span { animation: none; }
+  #panel { transition: none; }
 }

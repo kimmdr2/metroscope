@@ -6,6 +6,18 @@
   <meta name="theme-color" content="#0b0f14" />
   <title>metroscope · 수도권 지하철 실시간 지도</title>
   <meta name="description" content="수도권 전철 전 노선의 열차 위치와 배차 간격을 실제 지도 위에 3D로 보여줍니다." />
+  <link rel="icon" href="{{assets}}/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="{{assets}}/icon-192.png" />
+  <link rel="manifest" href="{{assets}}/manifest.webmanifest" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="metroscope" />
+  <meta property="og:title" content="metroscope · 수도권 지하철 실시간 지도" />
+  <meta property="og:description" content="수도권 전철 전 노선의 열차 위치와 배차 간격을 실제 지도 위에 3D로 보여줍니다." />
+  <meta property="og:url" content="{{origin}}/" />
+  <meta property="og:image" content="{{origin}}{{assets}}/og.jpg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -25,7 +37,7 @@
   </div>
 
   <aside id="panel" class="glass" data-open="false">
-    <button id="sheet-handle" type="button" aria-label="패널 펼치기"><span></span></button>
+    <button id="sheet-handle" type="button" aria-label="패널 펼치기" aria-expanded="false"><span></span></button>
 
     <header>
       <div class="brand">
@@ -103,7 +115,7 @@
       </div>
       <button id="sc-close" type="button" class="icon" aria-label="닫기">×</button>
     </div>
-    <div id="sc-board" class="board"></div>
+    <div id="sc-board" class="board" role="tabpanel" aria-label="도착 정보"></div>
   </div>
 
   <div id="train-card" class="card glass" hidden>
@@ -121,6 +133,7 @@
   </div>
 
   <div id="loading" class="loading"><span></span>지도를 불러오는 중</div>
+  <p id="map-notice" class="notice glass" role="status" hidden>배경 지도를 불러오지 못하고 있어요 · 노선과 열차는 계속 표시됩니다</p>
 
   <script type="module" src="{{assets}}/app.js"></script>
 </body>
