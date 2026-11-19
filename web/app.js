@@ -18,7 +18,13 @@ const RUN_SPEED = 11; // m/s
 const TRAIN = { length: 170, width: 34, height: 40 };
 const ZOOM_3D = 12.8; // dots hand over to 3D bodies around here
 const SIDE_PX = 6; // trains keep this far right of their direction of travel
-const GAP_COLORS = { bunch: "#5eead4", ok: "#3f8f5c", wide: "#f59e0b", hole: "#ef4444" };
+// Keyed by panel theme; the same values as the legend's --gap-* colors in style.css.
+const GAP_COLORS = {
+  dark: { bunch: "#5eead4", ok: "#3f8f5c", wide: "#f59e0b", hole: "#ef4444" },
+  light: { bunch: "#0ea5a4", ok: "#3f9a62", wide: "#f59e0b", hole: "#ef4444" },
+};
+// A finger is less exact than a cursor: a tap that hits nothing looks again this far around it.
+const TOUCH_PX = 22;
 // Trains are re-uploaded to the map at most this often; the map itself still renders every frame.
 const TRAIN_FRAME_MS = mobile || coarse ? 50 : 33;
 const THEME_KEY = "metroscope:theme";
@@ -837,10 +843,11 @@ function renderTrains() {
 // ---------- headway gaps ----------
 
 function gapColor(stationsApart) {
-  if (stationsApart < 1) return GAP_COLORS.bunch;
-  if (stationsApart >= 6) return GAP_COLORS.hole;
-  if (stationsApart >= 4) return GAP_COLORS.wide;
-  return GAP_COLORS.ok;
+  const colors = GAP_COLORS[ui];
+  if (stationsApart < 1) return colors.bunch;
+  if (stationsApart >= 6) return colors.hole;
+  if (stationsApart >= 4) return colors.wide;
+  return colors.ok;
 }
 
 /** Like posOfDist, but distances past the end of a loop keep counting up instead of wrapping. */
@@ -943,14 +950,25 @@ function renderRipples(now) {
 
 const tip = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: "tip", offset: 14, maxWidth: "260px" });
 
-function trainAt(point) {
-  const box = [[point.x - 8, point.y - 8], [point.x + 8, point.y + 8]];
-  const hit = map.queryRenderedFeatures(box, { layers: ["train-3d", "train-3d-arrow", "train-dot", "train-arrow"] })[0];
-  return hit && trains.get(hit.properties.id);
+const boxAround = (point, r) => [[point.x - r, point.y - r], [point.x + r, point.y + r]];
+/** Of everything `ll` picks out of `hits`, the one drawn nearest to `point`. */
+function nearest(point, hits, ll) {
+  let best;
+  let bestD = Infinity;
+  for (const h of hits) {
+    const p = map.project(ll(h));
+    const d = (p.x - point.x) ** 2 + (p.y - point.y) ** 2;
+    if (d < bestD) [best, bestD] = [h, d];
+  }
+  return best;
 }
-function stationAt(point) {
-  const box = [[point.x - 6, point.y - 6], [point.x + 6, point.y + 6]];
-  return map.queryRenderedFeatures(box, { layers: ["station-dot", "label-transfer", "label-station"] })[0];
+function trainAt(point, r = 8) {
+  const hits = map.queryRenderedFeatures(boxAround(point, r), { layers: ["train-3d", "train-3d-arrow", "train-dot", "train-arrow"] });
+  return nearest(point, hits.map((h) => trains.get(h.properties.id)).filter(Boolean), (t) => t.ll);
+}
+function stationAt(point, r = 6) {
+  const hits = map.queryRenderedFeatures(boxAround(point, r), { layers: ["station-dot", "label-transfer", "label-station"] });
+  return nearest(point, hits, (h) => h.geometry.coordinates);
 }
 
 function trainSummary(t) {
@@ -982,12 +1000,16 @@ function onHover(e) {
 function onClick(e) {
   // On touch screens the hover tooltip would otherwise stay up after a tap.
   if (coarse) tip.remove();
-  const t = !following && trainAt(e.point);
+  let t = !following && trainAt(e.point);
+  let s = !t && stationAt(e.point);
+  if (coarse && !t && !s) {
+    t = !following && trainAt(e.point, TOUCH_PX);
+    s = !t && stationAt(e.point, TOUCH_PX);
+  }
   if (t) {
     selectTrain(t.id);
     return;
   }
-  const s = stationAt(e.point);
   if (s) {
     openBoard(s.properties.name, s.properties.lines.split(",").filter(Boolean));
     // While following, the camera stays on the train; the board still opens.
@@ -1056,13 +1078,17 @@ function closeBoard() {
 async function fetchBoard() {
   const b = board;
   if (!b) return;
-  renderBoard();
+  const line = b.line;
+  if (b.data === undefined) renderBoard();
   let data = null;
   try {
-    const res = await fetch(`/api/board?line=${encodeURIComponent(b.line)}&station=${encodeURIComponent(b.name)}`);
+    const res = await fetch(`/api/board?line=${encodeURIComponent(line)}&station=${encodeURIComponent(b.name)}`);
     if (res.ok) data = await res.json();
   } catch {}
-  if (board !== b) return;
+  if (board !== b || b.line !== line) return;
+  // The rows are buttons: rebuilding them drops keyboard focus and any click in progress, so an
+  // unchanged board is left as it is.
+  if (b.data !== undefined && JSON.stringify(data) === JSON.stringify(b.data)) return;
   b.data = data;
   renderBoard();
 }
@@ -1099,6 +1125,123 @@ function renderBoard() {
       })
       .join("")}</ol></section>`)
     .join("");
+}
+
+/** Counts the open board down in place, once a second. */
+function tickBoard() {
+  if (!board?.data?.groups?.length) return;
+  const items = board.data.groups.flatMap((g) => g.items);
+  $("sc-board").querySelectorAll(".when").forEach((el, i) => {
+    const w = when(items[i]);
+    if (el.textContent !== w.text) el.textContent = w.text;
+    el.classList.toggle("far", w.far);
+  });
+}
+
+// ---------- station search ----------
+
+const CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+/** Initial consonants of a Hangul string (강남 → ㄱㄴ), so typing just those finds the station. */
+const chosung = (s) => [...s].map((ch) => {
+  const code = ch.charCodeAt(0) - 0xac00;
+  return code >= 0 && code < 11172 ? CHO[Math.floor(code / 588)] : ch;
+}).join("");
+
+let results = [];
+let activeResult = -1;
+
+function searchStations(query) {
+  const find = (q) => {
+    const initials = /^[ㄱ-ㅎ]+$/.test(q);
+    const found = [];
+    for (const s of stations) {
+      const i = (initials ? s.cho : s.key).indexOf(q);
+      if (i >= 0) found.push({ s, rank: i === 0 ? 0 : 1 });
+    }
+    // Names that start with the query first, then the bigger interchanges.
+    found.sort((a, b) => a.rank - b.rank || b.s.lines.length - a.s.lines.length || a.s.name.localeCompare(b.s.name, "ko"));
+    return found.slice(0, 8).map((f) => f.s);
+  };
+  const q = query.replace(/\s+/g, "").toLowerCase();
+  if (!q) return [];
+  const found = find(q);
+  // "강남역" should find 강남; names that really end in 역 (서울역) already matched above.
+  return found.length || q.length < 2 || !q.endsWith("역") ? found : find(q.slice(0, -1));
+}
+
+function renderResults() {
+  const input = $("search-input");
+  const list = $("search-list");
+  const open = document.activeElement === input && !!input.value.trim();
+  list.hidden = !open;
+  input.setAttribute("aria-expanded", String(open));
+  if (open && activeResult >= 0) input.setAttribute("aria-activedescendant", `search-opt-${activeResult}`);
+  else input.removeAttribute("aria-activedescendant");
+  if (!open) return;
+  list.innerHTML = results.length
+    ? results
+      .map((s, i) => `<li role="option" id="search-opt-${i}" data-result="${i}" aria-selected="${i === activeResult}"><span>${esc(s.name)}</span><span class="badges">${s.lines.map((id) => badgeHtml(lines.get(id))).join("")}</span></li>`)
+      .join("")
+    : `<li role="option" aria-disabled="true">찾는 역이 없어요</li>`;
+  list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+}
+
+function goToStation(s) {
+  const input = $("search-input");
+  input.value = "";
+  results = [];
+  activeResult = -1;
+  input.blur();
+  renderResults();
+  openBoard(s.name, s.lines);
+  // While following, the camera stays on the train; the board still opens.
+  if (!following) ease({ center: s.ll, zoom: Math.max(map.getZoom(), 14.5), duration: 1200 });
+}
+
+function wireSearch() {
+  for (const s of stations) {
+    s.key = s.name.toLowerCase();
+    s.cho = chosung(s.name);
+  }
+  const input = $("search-input");
+  const list = $("search-list");
+  input.addEventListener("input", () => {
+    results = searchStations(input.value);
+    activeResult = results.length ? 0 : -1;
+    renderResults();
+  });
+  input.addEventListener("focus", renderResults);
+  input.addEventListener("blur", renderResults);
+  input.addEventListener("keydown", (e) => {
+    // Keys pressed mid-syllable belong to the Hangul input method.
+    if (e.isComposing) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!results.length) return;
+      activeResult = (activeResult + (e.key === "ArrowDown" ? 1 : -1) + results.length) % results.length;
+      renderResults();
+    } else if (e.key === "Enter") {
+      if (results[activeResult]) goToStation(results[activeResult]);
+    } else if (e.key === "Escape") {
+      // Escape here only leaves the search; it shouldn't also close a board or drop the focus.
+      e.stopPropagation();
+      input.value = "";
+      results = [];
+      activeResult = -1;
+      input.blur();
+    }
+  });
+  // Keep the input focused through a press on the list, or it would close before the click lands.
+  list.addEventListener("pointerdown", (e) => e.preventDefault());
+  list.addEventListener("click", (e) => {
+    const s = results[e.target.closest("[data-result]")?.dataset.result];
+    if (s) goToStation(s);
+  });
+  addEventListener("keydown", (e) => {
+    if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || document.activeElement === input) return;
+    e.preventDefault();
+    input.focus();
+  });
 }
 
 // ---------- panel ----------
@@ -1140,7 +1283,7 @@ function tickClock() {
   $("date").textContent = kstDate.format(d);
   updateAge();
   updateTrainCard();
-  if (board?.data) renderBoard();
+  tickBoard();
   if (theme === "auto" && Date.now() - lastThemeTick > 60_000) {
     lastThemeTick = Date.now();
     applyTheme();
@@ -1214,6 +1357,7 @@ try {
   buildLineList();
   wireUi();
   createMap();
+  wireSearch();
   connect();
   tickClock();
   setInterval(tickClock, 1000);

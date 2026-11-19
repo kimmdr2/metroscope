@@ -15,6 +15,15 @@
 <body>
   <div id="map" aria-label="수도권 지하철 실시간 지도"></div>
 
+  <div id="search" class="glass" role="search">
+    <label class="search-row">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+      <input id="search-input" type="text" placeholder="역 검색" aria-label="역 검색" autocomplete="off" spellcheck="false" enterkeyhint="search"
+        role="combobox" aria-expanded="false" aria-controls="search-list" aria-autocomplete="list" />
+    </label>
+    <ul id="search-list" role="listbox" aria-label="검색 결과" hidden></ul>
+  </div>
+
   <aside id="panel" class="glass" data-open="false">
     <button id="sheet-handle" type="button" aria-label="패널 펼치기"><span></span></button>
 
@@ -94,7 +103,7 @@
       </div>
       <button id="sc-close" type="button" class="icon" aria-label="닫기">×</button>
     </div>
-    <div id="sc-board" class="board" aria-live="polite"></div>
+    <div id="sc-board" class="board"></div>
   </div>
 
   <div id="train-card" class="card glass" hidden>

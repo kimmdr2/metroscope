@@ -225,6 +225,32 @@ footer { font-size: 11px; color: var(--faint); line-height: 1.5; }
 footer a { color: var(--muted); text-decoration: none; }
 footer a:hover { color: var(--text); }
 
+/* ---------- station search ---------- */
+
+/* Floats over the map beside the panel (on phones, across the top). */
+#search {
+  position: fixed;
+  top: 16px;
+  left: 352px;
+  width: 280px;
+  border-radius: 14px;
+  background: var(--glass-strong);
+  z-index: 3;
+}
+#search:focus-within { border-color: var(--accent); }
+.search-row { display: flex; align-items: center; gap: 8px; padding: 0 12px; cursor: text; }
+.search-row svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; }
+#search-input { flex: 1; min-width: 0; padding: 10px 0; border: 0; outline: 0; background: none; color: inherit; font: inherit; font-size: 14px; }
+#search-input::placeholder { color: var(--muted); }
+#search-list { list-style: none; margin: 0; padding: 4px; border-top: 1px solid var(--border); max-height: min(50vh, 330px); overflow-y: auto; }
+#search-list[hidden] { display: none; }
+#search-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 8px; border-radius: 9px; font-size: 13px; cursor: pointer; }
+#search-list li:hover { background: rgba(127, 127, 127, 0.08); }
+#search-list li[aria-selected="true"] { background: rgba(127, 127, 127, 0.16); }
+#search-list li[aria-disabled="true"] { color: var(--muted); cursor: default; background: none; }
+#search-list .badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
+#search-list .line-badge { min-width: 22px; height: 18px; font-size: 10px; padding: 0 5px; }
+
 /* ---------- cards: train, station board ---------- */
 
 /* Station board and train card stack in one column (both can be open while following). */
@@ -357,7 +383,11 @@ footer a:hover { color: var(--text); }
   #sheet-handle span { width: 40px; height: 4px; border-radius: 2px; background: var(--border-strong); }
   #clock { font-size: 26px; }
   .stats dd { font-size: 18px; }
-  #cards { left: 12px; right: 12px; width: auto; top: 12px; bottom: auto; max-height: 55vh; justify-content: flex-start; }
+  /* Left of the map's zoom buttons; the cards open underneath. */
+  #search { top: 12px; left: 12px; right: 58px; width: auto; }
+  /* Under 16px, iOS zooms the whole page when the field is focused. */
+  #search-input { font-size: 16px; }
+  #cards { left: 12px; right: 12px; width: auto; top: 68px; bottom: auto; max-height: 55vh; justify-content: flex-start; }
   .maplibregl-ctrl-top-right { top: 0; }
 }
 
